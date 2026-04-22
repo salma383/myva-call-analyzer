@@ -1,0 +1,22 @@
+# Build artefacts
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# User config (contains caller name / theme, not secret but no need to share)
+.call_analyzer/
+
+# Temp audio files
+temp/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
