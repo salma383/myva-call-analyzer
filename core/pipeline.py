@@ -330,6 +330,74 @@ def score(transcript: str, client_key: str, caller_name: str, call_date: str) ->
         return {"error": "Failed to parse GPT response", "raw": raw}
 
 
+# ─── Speaker diarization (agent vs prospect) ──────────────────────────────────
+
+def diarize(stamped_transcript: str, caller_name: str, client_key: str) -> list[str]:
+    """
+    Ask GPT to label each transcript line as 'A' (Agent) or 'P' (Prospect).
+    Returns one label per non-empty input line. Much cheaper than re-emitting
+    the full transcript — GPT only outputs a single letter per line.
+    """
+    lines = [l for l in stamped_transcript.splitlines() if l.strip()]
+    if not lines:
+        return []
+
+    # Give each line a numeric index so GPT can't drop or rearrange them
+    numbered = "\n".join(f"{i+1}. {line}" for i, line in enumerate(lines))
+
+    prompt = f"""You are a speaker-diarization assistant. Below is a transcript of a cold outreach call.
+The AGENT is "{caller_name}" — they placed the call on behalf of a real-estate / business acquisitions team.
+The PROSPECT is the homeowner / business owner being called.
+
+For EACH numbered line, output exactly one letter on its own line:
+  A = Agent (the caller, "{caller_name}", works for the outreach team)
+  P = Prospect (the person being called)
+
+Rules:
+- Agent usually introduces themselves, asks qualifying questions, explains they're calling about a property or business.
+- Prospect usually answers questions, provides personal info, asks questions back about the offer.
+- Output EXACTLY {len(lines)} letters, one per line, nothing else.
+- No commentary, no line numbers, no punctuation — just A or P per line.
+
+TRANSCRIPT:
+{numbered}
+"""
+
+    try:
+        client = get_client()
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+        )
+        raw = response.choices[0].message.content.strip()
+        labels = [c.strip().upper()[0] for c in raw.splitlines() if c.strip()]
+        # Pad / truncate to exactly match input line count
+        while len(labels) < len(lines):
+            labels.append(labels[-1] if labels else "A")
+        return labels[:len(lines)]
+    except Exception:
+        # Fallback: simple alternation
+        return ["A" if i % 2 == 0 else "P" for i in range(len(lines))]
+
+
+def build_labeled_transcript(stamped_transcript: str, labels: list[str]) -> str:
+    """Merge stamped transcript with A/P labels into a readable, speaker-tagged transcript."""
+    lines = [l for l in stamped_transcript.splitlines() if l.strip()]
+    merged = []
+    for i, line in enumerate(lines):
+        m = re.match(r'(\[\d{2}:\d{2}\])\s+(.*)', line)
+        if not m:
+            merged.append(line)
+            continue
+        stamp, text = m.group(1), m.group(2)
+        label = labels[i] if i < len(labels) else "A"
+        speaker = "Agent" if label == "A" else "Prospect"
+        arrow   = "→" if label == "A" else "◆"
+        merged.append(f"{stamp} {arrow} {speaker}: {text}")
+    return "\n".join(merged)
+
+
 # ─── Public pipeline entry point ─────────────────────────────────────────────
 
 def run(
@@ -350,12 +418,17 @@ def run(
             on_progress(25, "Transcribing (Whisper)…")
             plain_transcript, stamped_transcript = transcribe(file_path)
 
-            on_progress(60, "Scoring call (GPT-4.1-mini)…")
+            on_progress(55, "Identifying speakers…")
+            labels = diarize(stamped_transcript, caller_name, client_key)
+            labeled_transcript = build_labeled_transcript(stamped_transcript, labels)
+
+            on_progress(70, "Scoring call (GPT-4.1-mini)…")
             result = score(plain_transcript, client_key, caller_name, call_date)
 
             on_progress(95, "Finalising…")
             result["transcript"] = plain_transcript
             result["stamped_transcript"] = stamped_transcript
+            result["labeled_transcript"] = labeled_transcript
             result["file"] = os.path.basename(file_path)
             result["client"] = client_key
             result["caller_name"] = caller_name

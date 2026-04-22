@@ -2,11 +2,23 @@
 import PyInstaller.__main__
 import os
 import shutil
+import tempfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-ICON_PATH = os.path.join(ROOT, "assets", "icons", "app.ico")
-LOGO_PATH = os.path.join(ROOT, "assets", "icons", "logo.png")
+ICON_SRC = os.path.join(ROOT, "assets", "icons", "app.ico")
+
+
+def _stage_icon() -> str | None:
+    """
+    PyInstaller silently fails to embed icons when the path contains spaces.
+    Copy the icon to a temp path without spaces and return that.
+    """
+    if not os.path.exists(ICON_SRC):
+        return None
+    staged = os.path.join(tempfile.gettempdir(), "myva_app.ico")
+    shutil.copyfile(ICON_SRC, staged)
+    return staged
 
 
 def build():
@@ -45,13 +57,12 @@ def build():
         "--collect-all=tkinterdnd2",
     ]
 
-    # App icon — use app.ico if it exists
-    if os.path.exists(ICON_PATH):
-        args.append(f"--icon={ICON_PATH}")
-        print(f"[build] Using icon: {ICON_PATH}")
+    staged_icon = _stage_icon()
+    if staged_icon:
+        args.append(f"--icon={staged_icon}")
+        print(f"[build] Staged icon: {staged_icon}")
     else:
-        print("[build] No icon found — run  python create_icon.py  first to add the logo.")
-        print(f"        (expected: {ICON_PATH})")
+        print(f"[build] No icon found — expected at {ICON_SRC}")
 
     PyInstaller.__main__.run(args)
     print("\nBuild complete — exe is at:  dist/CallAnalyzer.exe")

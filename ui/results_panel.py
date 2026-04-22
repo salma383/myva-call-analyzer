@@ -509,39 +509,16 @@ class ResultsPanel(ctk.CTkFrame):
 
     def _merge_transcript(self, result: dict) -> str:
         """
-        Combine Whisper timestamps with simple speaker alternation.
-        First speaker = Agent (they placed the call), then alternates.
-        Uses real timestamps from verbose_json when available.
+        Return the transcript with speaker labels.
+        Prefers the GPT-diarized version; falls back to the raw stamped transcript.
         """
+        labeled = result.get("labeled_transcript")
+        if labeled:
+            return labeled
         stamped = result.get("stamped_transcript", "")
-        if not stamped:
-            return result.get("transcript", "")
-
-        lines = stamped.splitlines()
-        merged = []
-        speakers = ["Agent", "Prospect"]
-        speaker_idx = 0
-        prev_end = 0.0
-
-        for line in lines:
-            m = _re.match(r'\[(\d{2}):(\d{2})\]\s+(.*)', line)
-            if not m:
-                merged.append(line)
-                continue
-
-            mins, secs, text = int(m.group(1)), int(m.group(2)), m.group(3)
-            start = mins * 60 + secs
-
-            # Switch speaker if there's a meaningful pause (>2.5s gap between segments)
-            if start - prev_end > 2.5 and merged:
-                speaker_idx = 1 - speaker_idx
-            prev_end = start + max(len(text.split()) / (130 / 60), 2.0)
-
-            label = speakers[speaker_idx]
-            color_prefix = "→" if label == "Agent" else "◆"
-            merged.append(f"[{m.group(1)}:{m.group(2)}] {color_prefix} {label}: {text}")
-
-        return "\n".join(merged)
+        if stamped:
+            return stamped
+        return result.get("transcript", "")
 
     def _save_mv(self):
         mv = self.mv_entry.get().strip()
