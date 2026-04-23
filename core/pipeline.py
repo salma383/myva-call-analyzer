@@ -780,26 +780,19 @@ def run(
             on_progress(25, "Transcribing (Whisper)…")
             plain_transcript, stamped_transcript = transcribe(file_path)
 
-            # Run diarization, fact extraction, AND scoring all in parallel —
-            # none of them depend on each other. Facts get merged into the
-            # lead template locally after, so there's no serial GPT chain.
-            on_progress(60, "Analyzing (parallel: speakers + facts + scoring)…")
+            # 2-way parallel: diarize || score. Running a 3rd concurrent chat
+            # completion (fact extraction) triggered hidden rate-limit retry
+            # loops on some OpenAI tiers that made the pipeline appear hung.
+            on_progress(60, "Analyzing (parallel: speakers + scoring)…")
 
-            with ThreadPoolExecutor(max_workers=3) as ex:
+            with ThreadPoolExecutor(max_workers=2) as ex:
                 f_labels = ex.submit(diarize, stamped_transcript, caller_name, client_key)
-                f_facts  = ex.submit(extract_facts, plain_transcript, client_key)
                 f_result = ex.submit(
                     score, plain_transcript, client_key, caller_name, call_date,
                     phone_number, None,
                 )
                 labels = f_labels.result()
-                facts  = f_facts.result()
                 result = f_result.result()
-
-            # Overwrite likely-hallucinated template fields with verified facts
-            if result.get("lead_template"):
-                result["lead_template"] = _apply_facts(result["lead_template"], facts)
-            result["_facts"] = facts
 
             labeled_transcript = build_labeled_transcript(stamped_transcript, labels)
 
