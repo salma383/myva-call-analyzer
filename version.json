@@ -1,5 +1,5 @@
 {
-  "version": "1.6.1",
+  "version": "1.6.2",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Speed fix. The 1.6.0 fact-extraction pass ran in series before scoring, which doubled the analysis time. It now runs in parallel with scoring and diarization, and the verified facts are merged into the lead template locally afterward. Same hallucination protection, no added latency."
+  "release_notes": "Stability fix. Replaced OpenAI strict JSON schema mode (which caused the app to hang in 1.6.0–1.6.1) with the simpler json_object mode. Added explicit timeouts on every API call so the pipeline can never get stuck forever. Fact-extraction and scoring still run in parallel."
 }

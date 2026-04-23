@@ -116,6 +116,7 @@ def _transcribe_file(path: str, offset_sec: float):
             prompt=WHISPER_VOCAB,
             response_format="verbose_json",
             timestamp_granularities=["segment"],
+            timeout=120,
         )
 
     raw_text = result.text if hasattr(result, "text") else str(result)
@@ -397,8 +398,7 @@ _FACTS_SCHEMA = {
 def extract_facts(transcript: str, client_key: str) -> dict:
     """
     Pass 1 — extract only explicitly-stated facts from the transcript.
-    Returns a dict matching _FACTS_SCHEMA. Values are null when the prospect
-    did not literally state them (no inference allowed).
+    Values are null when the prospect did not literally state them.
     """
     client = get_client()
 
@@ -414,6 +414,11 @@ def extract_facts(transcript: str, client_key: str) -> dict:
     )
 
     prompt = f"""Extract ONLY facts the prospect literally stated in this cold-call transcript.
+Return a JSON object with EXACTLY these keys (use null when unstated):
+  "prospect_name", "prospect_email", "prospect_phone", "property_address",
+  "property_type", "business_type", "asking_price" (number), "motivation",
+  "timeline_months" (number), "open_to_listing" (boolean),
+  "other_notes" (array of strings — any other prospect-stated details).
 
 Rules — read carefully:
 - DO NOT infer, guess, or fill in plausible values. If unstated, return null.
@@ -423,7 +428,6 @@ Rules — read carefully:
   * "D-U-S-T-I-N at DoubleDOutfitters.com" → "dustin@doubledoutfitters.com"
   * If the prospect corrected themselves ("not plural", "actually..."), use the CORRECTED version.
 - If asked a yes/no question and the prospect gave no clear answer, return null (not false).
-- "other_notes" = array of any other prospect-stated details that don't fit the named fields.
 
 {domain_hint}
 
@@ -431,17 +435,17 @@ TRANSCRIPT:
 {transcript}
 """
 
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
-        response_format={"type": "json_schema", "json_schema": _FACTS_SCHEMA},
-    )
-    raw = response.choices[0].message.content
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        # Structured output guarantees valid JSON, but be defensive anyway
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            timeout=90,
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception:
+        # Fact extraction is best-effort — scoring still works without it
         return {k: None for k in _FACTS_SCHEMA["schema"]["required"]}
 
 
@@ -580,8 +584,8 @@ def score(transcript: str, client_key: str, caller_name: str, call_date: str,
           phone_number: str | None = None, facts: dict | None = None) -> dict:
     """
     Pass 2 — grade the call and fill the lead template.
-    Uses OpenAI's strict JSON schema enforcement so the output is guaranteed
-    to match _SCORING_SCHEMA. No regex-fallback parser needed.
+    Uses json_object response format (guaranteed valid JSON, no schema compile
+    overhead) with a defensive parser fallback.
     """
     client = get_client()
     prompt = _build_prompt(transcript, client_key, caller_name, call_date, phone_number, facts)
@@ -590,9 +594,23 @@ def score(transcript: str, client_key: str, caller_name: str, call_date: str,
         model="gpt-4.1-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
-        response_format={"type": "json_schema", "json_schema": _SCORING_SCHEMA},
+        response_format={"type": "json_object"},
+        timeout=90,
     )
-    return json.loads(response.choices[0].message.content)
+    raw = (response.choices[0].message.content or "").strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r'\{[\s\S]*\}', raw)
+        if match:
+            try:
+                return json.loads(match.group())
+            except Exception:
+                pass
+        return {"error": "Failed to parse GPT response", "raw": raw}
 
 
 # ─── Speaker diarization (agent vs prospect) ──────────────────────────────────
@@ -634,6 +652,7 @@ TRANSCRIPT:
             model="gpt-4.1-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
+            timeout=60,
         )
         raw = response.choices[0].message.content.strip()
         labels = [c.strip().upper()[0] for c in raw.splitlines() if c.strip()]
