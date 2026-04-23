@@ -1,5 +1,5 @@
 {
-  "version": "1.3.0",
+  "version": "1.4.0",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Auto-extract prospect phone number from the audio file name and fill it into the lead template."
+  "release_notes": "Faster analysis — diarization and scoring now run in parallel, and audio is uploaded as a compact 16kHz mp3 (same transcription quality, much smaller upload). Fixed the Windows taskbar icon so it shows the MyVA logo instead of the default Python icon."
 }
