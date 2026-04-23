@@ -1,5 +1,5 @@
 {
-  "version": "1.6.4",
+  "version": "1.6.5",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Diagnostic release — no behaviour changes. Adds timing measurements for each pipeline stage so we can see exactly where the seconds go. The 'Done' message now shows a per-stage breakdown."
+  "release_notes": "Fix regression from 1.6.0: scoring prompt was still telling GPT to use extracted facts that no longer exist, which caused the model to skip the checklist and score fields and return only the lead template. Restored the clean v1.5 scoring prompt. Timing instrumentation from 1.6.4 is kept — log file at %LocalAppData%\\MyVA\\logs\\timing.log."
 }

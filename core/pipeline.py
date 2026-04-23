@@ -519,45 +519,60 @@ def _build_prompt(transcript: str, client_key: str, caller_name: str, call_date:
 
     phone_note = (
         f"   - PROSPECT PHONE NUMBER = \"{phone_number}\" (extracted from the call recording filename — "
-        f"use this EXACT value in any phone / number field).\n"
+        f"use this EXACT value in any phone / number field, do NOT infer from the transcript).\n"
         if phone_number else
-        "   - Phone number: leave blank if not provided in the extracted facts.\n"
-    )
-
-    facts_block = (
-        f"\nEXTRACTED FACTS (use these verbatim — do NOT re-derive from transcript):\n"
-        f"{json.dumps(facts, indent=2)}\n"
-        if facts is not None else ""
+        "   - Phone number: leave blank if not explicitly mentioned in transcript.\n"
     )
 
     return f"""You are a call quality analyst for a real estate / business acquisitions outreach team.
 
-You will receive (1) a set of already-extracted facts the prospect literally stated, and
-(2) the raw transcript. Use the FACTS to fill the lead template. Use the TRANSCRIPT only
-to judge call quality (checklist, score, coaching). Do not invent facts that aren't in the
-extracted-facts block.
+Analyze the following call transcript and return a JSON object with these keys:
 
-Return a JSON object matching the required schema.
+1. "checklist": array of objects — one per checklist item:
+   {{ "item": "<item text>", "result": "yes" | "no" | "partial" | "n/a", "note": "<short explanation>" }}
 
-Key behaviour:
+2. "hard_disqualifiers_triggered": array of strings (empty if none triggered)
 
-- "checklist": one entry per checklist item below. result ∈ yes / no / partial / n/a.
-- "hard_disqualifiers_triggered": list anything from the disqualifier list the prospect triggered.
-- "red_flags": list anything from the red-flag list that appeared.
-- "score": integer 0–100 based on checklist performance.
-- "lead_template": the filled lead template as a plain string.
+3. "red_flags": array of strings (empty if none found)
+
+4. "score": integer 0–100 based on checklist performance
+
+5. "lead_template": the filled lead template as a plain string. Rules:
    - caller_name = "{caller_name}"
    - date = "{call_date}"
-{phone_note}   - {mv_note}Any field not present in the extracted facts → leave blank or "N/A".
-   - Use the EXTRACTED FACTS verbatim for every field they cover.
-   - Any extra prospect-stated detail in other_notes → put in Notes.
+{phone_note}   - {mv_note}Any information the prospect gave that has no matching field → put in Notes.
    - For real estate clients: include preliminary temperature and flag as "Preliminary — recalculate after MV is confirmed" if MV is unknown.
-- "preliminary_temp": one of Hot / Warm / Cold / Nurture / Throwaway (real estate only, else null).
+
+   EMAIL EXTRACTION — read very carefully and follow every rule:
+   - Hyphened single letters spell a word: "D-U-S-T-I-N" = "dustin", "B-R-O-O-K-S" = "brooks"
+   - A dot spoken before a name segment = literal dot: ".Brooks" = ".brooks"
+   - "at [Company].com" or "at [Company] dot com" = "@company.com"
+   - "dot" between two word parts = literal dot: "john dot smith" = "john.smith"
+   - Reconstruct the full email from ALL spoken parts in sequence.
+   - Example: "dustin, D-U-S-T-I-N, .Brooks, B-R-O-O-K-S, at DoubleDOutfitters.com"
+     → dustin.brooks@doubledoutfitters.com
+   - Example: "john at gmail dot com" → john@gmail.com
+   - Example: "sierra alpha romeo alpha at yahoo dot com" → sara@yahoo.com
+   - If letters are repeated/confirmed (prospect says name then spells it), use the spelled version, NOT the spoken name before spelling.
+   - Always lowercase the final email.
+
+   EMAIL CORRECTIONS — CRITICAL:
+   - If someone gives an email and then IMMEDIATELY corrects it (says "not plural", "without the s", "just service not services", "correction:", "actually it's", "I mean", "sorry it's"), ALWAYS use the CORRECTED version. The correction overrides EVERYTHING said before.
+   - Example: agent hears "proroofingservices1 at gmail dot com" then says "not plural on services, just service" → final email MUST be proroofingservice1@gmail.com
+   - Example: "john@gmail.com — actually make that johnny@gmail.com" → johnny@gmail.com
+   - Read the ENTIRE conversation after the email is first given to check for any correction.
+   - When in doubt, use the LAST version the prospect confirmed.
+
+6. "preliminary_temp": one of Hot / Warm / Cold / Nurture / Throwaway (real estate only, else null)
    Use this logic:
 {TEMP_LOGIC}
-- "coaching_notes": 2–4 short bullet points of specific feedback for this agent on this call.
-- "strengths": 1–3 things the agent did well.
-- "call_data": {{ ap, has_valid_motive, timeline_months, open_to_listing }} — prefer values from extracted facts.
+
+7. "coaching_notes": 2–4 short bullet points of specific feedback for this agent on this call
+
+8. "strengths": 1–3 things the agent did well
+
+9. "call_data": a small object used for temperature recalculation when MV is added later:
+   {{ "ap": <asking price as a number, or null>, "has_valid_motive": <true|false>, "timeline_months": <estimated months, or null>, "open_to_listing": <true|false> }}
 
 ---
 CLIENT: {client_key}
@@ -574,10 +589,12 @@ RED FLAGS TO WATCH FOR:
 
 TEMPLATE TO FILL:
 {template}
-{facts_block}
+
 ---
 TRANSCRIPT:
 {transcript}
+
+Return ONLY valid JSON. No markdown fences, no commentary outside the JSON.
 """
 
 
