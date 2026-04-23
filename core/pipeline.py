@@ -10,6 +10,37 @@ from core.audio_prep import prepare_audio
 from shared.criteria import CLIENT_CRITERIA, LEAD_TEMPLATES, TEMP_LOGIC, WHISPER_VOCAB, WHISPER_HALLUCINATIONS
 
 
+# ─── Phone number extraction from filename ───────────────────────────────────
+
+def extract_phone_from_filename(file_path: str) -> str | None:
+    """
+    Pull the prospect's phone number from the end of the audio filename.
+    Looks for the LAST run of 10 or 11 consecutive digits.
+
+    Examples:
+      '...-19728013866.wav'           → '+1 (972) 801-3866'
+      '20260422_1725_4405727500.mp3'  → '(440) 572-7500'
+      '...-connect-69882-a-24362-19728013866.wav' → '+1 (972) 801-3866'
+    """
+    name = os.path.splitext(os.path.basename(file_path))[0]
+
+    # Find ALL runs of 10 or 11 digits, take the last one
+    # Use a boundary regex so we don't match partial chunks of longer numbers
+    matches = re.findall(r'(?<!\d)(\d{10,11})(?!\d)', name)
+    if not matches:
+        return None
+
+    raw = matches[-1]
+
+    # Format: 10 digits = (AAA) BBB-CCCC ; 11 digits starting with 1 = +1 (AAA) BBB-CCCC
+    if len(raw) == 11 and raw.startswith("1"):
+        return f"+1 ({raw[1:4]}) {raw[4:7]}-{raw[7:]}"
+    if len(raw) == 10:
+        return f"({raw[0:3]}) {raw[3:6]}-{raw[6:]}"
+    # 11 digits not starting with 1 — return as-is with light formatting
+    return raw
+
+
 # ─── Whisper transcription ────────────────────────────────────────────────────
 
 def _fmt_time(seconds: float) -> str:
@@ -211,7 +242,8 @@ def _extract_emails_from_text(text: str) -> list[str]:
 
 # ─── GPT scoring ──────────────────────────────────────────────────────────────
 
-def _build_prompt(transcript: str, client_key: str, caller_name: str, call_date: str) -> str:
+def _build_prompt(transcript: str, client_key: str, caller_name: str, call_date: str,
+                  phone_number: str | None = None) -> str:
     criteria = CLIENT_CRITERIA[client_key]
     template_key = criteria["template_type"]
     template = LEAD_TEMPLATES[template_key]
@@ -225,6 +257,13 @@ def _build_prompt(transcript: str, client_key: str, caller_name: str, call_date:
         "Market Value / MV / Zestimate field must NEVER be filled — leave it blank regardless of what it is called in the template. "
         "The user will look it up on Zillow, Realtor.com, and Redfin manually.\n"
         if is_re else ""
+    )
+
+    phone_note = (
+        f"   - PROSPECT PHONE NUMBER = \"{phone_number}\" (extracted from the call recording filename — "
+        f"use this EXACT value in any phone / number field, do NOT infer from the transcript).\n"
+        if phone_number else
+        "   - Phone number: leave blank if not explicitly mentioned in transcript.\n"
     )
 
     return f"""You are a call quality analyst for a real estate / business acquisitions outreach team.
@@ -243,7 +282,7 @@ Analyze the following call transcript and return a JSON object with these keys:
 5. "lead_template": the filled lead template as a plain string. Rules:
    - caller_name = "{caller_name}"
    - date = "{call_date}"
-   - {mv_note}Any information the prospect gave that has no matching field → put in Notes.
+{phone_note}   - {mv_note}Any information the prospect gave that has no matching field → put in Notes.
    - For real estate clients: include preliminary temperature and flag as "Preliminary — recalculate after MV is confirmed" if MV is unknown.
 
    EMAIL EXTRACTION — read very carefully and follow every rule:
@@ -301,9 +340,10 @@ Return ONLY valid JSON. No markdown fences, no commentary outside the JSON.
 """
 
 
-def score(transcript: str, client_key: str, caller_name: str, call_date: str) -> dict:
+def score(transcript: str, client_key: str, caller_name: str, call_date: str,
+          phone_number: str | None = None) -> dict:
     client = get_client()
-    prompt = _build_prompt(transcript, client_key, caller_name, call_date)
+    prompt = _build_prompt(transcript, client_key, caller_name, call_date, phone_number)
 
     response = client.chat.completions.create(
         model="gpt-4.1-mini",
@@ -381,6 +421,30 @@ TRANSCRIPT:
         return ["A" if i % 2 == 0 else "P" for i in range(len(lines))]
 
 
+def _inject_phone(template_text: str, phone: str) -> str:
+    """
+    Safety net that forces the phone number into the filled lead template.
+    Handles every variant used across all 6 templates (Phone:, Phone Number:, Number:).
+    Only fills fields that are blank or contain an obvious placeholder.
+    """
+    # Pattern matches any line with a phone-like label followed by empty / placeholder text
+    patterns = [
+        r'^(\s*Phone Number\s*:)\s*(?:\{phone\}|\[.*?\]|N/?A|none|unknown|)\s*$',
+        r'^(\s*Phone\s*:)\s*(?:\{phone\}|\[.*?\]|N/?A|none|unknown|)\s*$',
+        r'^(\s*Number\s*:)\s*(?:\{phone\}|\[.*?\]|N/?A|none|unknown|)\s*$',
+    ]
+    for pat in patterns:
+        template_text = re.sub(
+            pat,
+            lambda m: f"{m.group(1)} {phone}",
+            template_text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+    # Also replace any remaining literal {phone} placeholders
+    template_text = template_text.replace("{phone}", phone)
+    return template_text
+
+
 def build_labeled_transcript(stamped_transcript: str, labels: list[str]) -> str:
     """Merge stamped transcript with A/P labels into a readable, speaker-tagged transcript."""
     lines = [l for l in stamped_transcript.splitlines() if l.strip()]
@@ -415,6 +479,9 @@ def run(
         try:
             on_progress(10, "Preparing audio…")
 
+            # Extract phone from filename up-front so GPT can use it
+            phone_number = extract_phone_from_filename(file_path)
+
             on_progress(25, "Transcribing (Whisper)…")
             plain_transcript, stamped_transcript = transcribe(file_path)
 
@@ -423,12 +490,18 @@ def run(
             labeled_transcript = build_labeled_transcript(stamped_transcript, labels)
 
             on_progress(70, "Scoring call (GPT-4.1-mini)…")
-            result = score(plain_transcript, client_key, caller_name, call_date)
+            result = score(plain_transcript, client_key, caller_name, call_date, phone_number)
 
             on_progress(95, "Finalising…")
+
+            # Safety-net: force the phone into the filled template even if GPT missed it
+            if phone_number and result.get("lead_template"):
+                result["lead_template"] = _inject_phone(result["lead_template"], phone_number)
+
             result["transcript"] = plain_transcript
             result["stamped_transcript"] = stamped_transcript
             result["labeled_transcript"] = labeled_transcript
+            result["phone_number"] = phone_number
             result["file"] = os.path.basename(file_path)
             result["client"] = client_key
             result["caller_name"] = caller_name

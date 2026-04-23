@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
+  "version": "1.3.0",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Fixed app icon embedding + GPT-based speaker diarization (Agent/Prospect labels in transcript)."
+  "release_notes": "Auto-extract prospect phone number from the audio file name and fill it into the lead template."
 }
