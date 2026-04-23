@@ -1,5 +1,5 @@
 {
-  "version": "1.9.1",
+  "version": "1.9.2",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Fix: temperature still not showing before MV entry. Root cause: TEMP_LOGIC instructed GPT to flag the temp as 'Preliminary — recalculate after MV is confirmed' when MV was unknown, so GPT was writing that exact phrase into the template AND returning null in the preliminary_temp field. Rewrote TEMP_LOGIC and the scoring-prompt rule to explicitly forbid the 'Preliminary' wording and require a concrete Hot/Warm/Cold/Nurture/Throwaway pick based on motive + timeline + AP + listing openness — regardless of MV. Added a belt-and-suspenders scrubber that post-processes the template to strip any 'Preliminary — recalculate…' text if GPT ever slips through."
+  "release_notes": "Stop ffmpeg/ffprobe from flashing console windows during analysis. pydub (the audio library) shells out to ffmpeg for format conversion, duration probing, and silence detection. By default on Windows each of those subprocess calls pops a brief black terminal. Patched subprocess.Popen at startup with CREATE_NO_WINDOW + hidden STARTUPINFO so every ffmpeg/ffprobe invocation runs silently in the background. No more terminal flashes during analysis or audio playback."
 }
