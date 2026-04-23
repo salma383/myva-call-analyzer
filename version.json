@@ -1,5 +1,5 @@
 {
-  "version": "1.6.0",
+  "version": "1.6.1",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Smarter analysis. Audio chunks now split on silent gaps (cleaner transcripts at the seams). Scoring output is enforced by a strict JSON schema so it never fails to parse. Added a two-pass flow: a fact-extraction pass runs before scoring so the lead template is filled from facts the prospect literally stated rather than the model's guesses — significantly less hallucination."
+  "release_notes": "Speed fix. The 1.6.0 fact-extraction pass ran in series before scoring, which doubled the analysis time. It now runs in parallel with scoring and diarization, and the verified facts are merged into the lead template locally afterward. Same hallucination protection, no added latency."
 }

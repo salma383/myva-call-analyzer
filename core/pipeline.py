@@ -646,6 +646,57 @@ TRANSCRIPT:
         return ["A" if i % 2 == 0 else "P" for i in range(len(lines))]
 
 
+def _apply_facts(template_text: str, facts: dict) -> str:
+    """
+    Override specific lead-template fields with values from the fact-extraction
+    pass. Facts are more reliable than the scoring pass's template fill because
+    they come from a strict-schema, temperature-0, literal-only extraction.
+
+    Only overrides fields where:
+      1. The fact has a non-null value, AND
+      2. The template line for that field exists, AND
+      3. The current template value differs from the fact (avoids unnecessary edits).
+    """
+    if not facts:
+        return template_text
+
+    # Map fact keys → likely template label variants (case-insensitive)
+    field_map = {
+        "prospect_name":    ["Name", "Prospect Name", "Owner Name", "Contact Name", "Full Name"],
+        "prospect_email":   ["Email", "Email Address", "E-mail"],
+        "property_address": ["Address", "Property Address", "Location"],
+        "asking_price":     ["Asking Price", "AP", "Price"],
+        "motivation":       ["Motivation", "Motive", "Reason for Selling"],
+    }
+
+    def _fmt_value(key: str, val) -> str:
+        if key == "asking_price" and isinstance(val, (int, float)):
+            return f"${int(val):,}"
+        return str(val).strip()
+
+    for fact_key, labels in field_map.items():
+        val = facts.get(fact_key)
+        if val in (None, "", []):
+            continue
+        formatted = _fmt_value(fact_key, val)
+        for label in labels:
+            # Match "<Label>: <anything-or-empty>" up to end of line
+            pattern = rf'^(\s*{re.escape(label)}\s*:)\s*(.*)$'
+            def _sub(m, new=formatted):
+                current = m.group(2).strip()
+                # Skip if the template already has the correct value
+                if current and current.lower() == new.lower():
+                    return m.group(0)
+                return f"{m.group(1)} {new}"
+            new_text, n = re.subn(pattern, _sub, template_text,
+                                   flags=re.IGNORECASE | re.MULTILINE)
+            if n:
+                template_text = new_text
+                break  # Only hit the first matching label variant
+
+    return template_text
+
+
 def _inject_phone(template_text: str, phone: str) -> str:
     """
     Safety net that forces the phone number into the filled lead template.
@@ -710,26 +761,26 @@ def run(
             on_progress(25, "Transcribing (Whisper)…")
             plain_transcript, stamped_transcript = transcribe(file_path)
 
-            # Run speaker diarization in parallel with the two-pass
-            # (extract facts → score) chain. Diarize only needs the stamped
-            # transcript; the extract→score chain only needs the plain one,
-            # so they're fully independent.
-            on_progress(60, "Extracting facts, scoring & identifying speakers…")
+            # Run diarization, fact extraction, AND scoring all in parallel —
+            # none of them depend on each other. Facts get merged into the
+            # lead template locally after, so there's no serial GPT chain.
+            on_progress(60, "Analyzing (parallel: speakers + facts + scoring)…")
 
-            def _extract_then_score():
-                facts = extract_facts(plain_transcript, client_key)
-                result = score(
-                    plain_transcript, client_key, caller_name, call_date,
-                    phone_number, facts,
-                )
-                result["_facts"] = facts  # stash for UI / debugging
-                return result
-
-            with ThreadPoolExecutor(max_workers=2) as ex:
+            with ThreadPoolExecutor(max_workers=3) as ex:
                 f_labels = ex.submit(diarize, stamped_transcript, caller_name, client_key)
-                f_result = ex.submit(_extract_then_score)
+                f_facts  = ex.submit(extract_facts, plain_transcript, client_key)
+                f_result = ex.submit(
+                    score, plain_transcript, client_key, caller_name, call_date,
+                    phone_number, None,
+                )
                 labels = f_labels.result()
+                facts  = f_facts.result()
                 result = f_result.result()
+
+            # Overwrite likely-hallucinated template fields with verified facts
+            if result.get("lead_template"):
+                result["lead_template"] = _apply_facts(result["lead_template"], facts)
+            result["_facts"] = facts
 
             labeled_transcript = build_labeled_transcript(stamped_transcript, labels)
 
