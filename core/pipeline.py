@@ -195,6 +195,9 @@ def transcribe(file_path: str) -> tuple[str, str]:
                 text = reconstruct_spelled_out(text.strip())
                 if text:
                     lines.append(f"[{_fmt_time(start)}] {text}")
+            # Collapse Whisper hallucination loops: if the SAME line appears 3+
+            # times in a row (e.g. "All right." x 20), keep just the first.
+            lines = _dedupe_consecutive_lines(lines)
             stamped = "\n".join(lines)
         else:
             stamped = _add_rough_timestamps(plain)
@@ -226,6 +229,38 @@ def _build_stamped_from_segments(segments) -> str:
         if text:
             lines.append(f"[{_fmt_time(start)}] {text}")
     return "\n".join(lines)
+
+
+def _dedupe_consecutive_lines(lines: list[str]) -> list[str]:
+    """
+    Collapse Whisper's hallucination loops where the same phrase repeats on many
+    consecutive segments (e.g. during silence). Keeps the FIRST occurrence and
+    drops any immediate duplicates; once a different line appears, the loop resets.
+
+    Normalization: strip timestamp prefix, lowercase, strip punctuation+whitespace.
+    A "duplicate" means identical normalized text AND very short (≤ 6 words) — so
+    we don't accidentally drop two genuine long sentences that happen to match.
+    """
+    def _norm(line: str) -> str:
+        # Strip the leading "[MM:SS]" before comparing
+        m = re.match(r'\[\d{2}:\d{2}\]\s*(.*)', line)
+        body = m.group(1) if m else line
+        body = re.sub(r'[^\w\s]', '', body).strip().lower()
+        return body
+
+    out: list[str] = []
+    last_norm: str | None = None
+    for line in lines:
+        n = _norm(line)
+        if not n:
+            continue
+        # Only dedupe short repeated phrases (typical hallucination loops)
+        is_short = len(n.split()) <= 6
+        if is_short and n == last_norm:
+            continue
+        out.append(line)
+        last_norm = n
+    return out
 
 
 def _add_rough_timestamps(text: str) -> str:
@@ -501,7 +536,8 @@ _SCORING_SCHEMA = {
 
 
 def _build_prompt(transcript: str, client_key: str, caller_name: str, call_date: str,
-                  phone_number: str | None = None, facts: dict | None = None) -> str:
+                  phone_number: str | None = None, facts: dict | None = None,
+                  stamped_transcript: str | None = None) -> str:
     criteria = CLIENT_CRITERIA[client_key]
     template_key = criteria["template_type"]
     template = LEAD_TEMPLATES[template_key]
@@ -574,6 +610,15 @@ Analyze the following call transcript and return a JSON object with these keys:
 9. "call_data": a small object used for temperature recalculation when MV is added later:
    {{ "ap": <asking price as a number, or null>, "has_valid_motive": <true|false>, "timeline_months": <estimated months, or null>, "open_to_listing": <true|false> }}
 
+10. "speaker_labels": array of strings, one entry per numbered line in STAMPED TRANSCRIPT below.
+    Each entry MUST be exactly "A" (Agent = "{caller_name}", the caller who works for the outreach team)
+    or "P" (Prospect, the homeowner/business owner being called).
+    - The AGENT usually: introduces themselves ("This is {caller_name} with…"), asks qualifying questions,
+      explains they're calling about a property/business, asks for email, proposes next steps.
+    - The PROSPECT usually: answers questions, gives personal details (address, price, years owned), may push back.
+    - Output EXACTLY one letter per line in the stamped transcript, in the same order.
+    - Do NOT merge or skip lines.
+
 ---
 CLIENT: {client_key}
 FRAMEWORK: {criteria['framework']}
@@ -594,19 +639,30 @@ TEMPLATE TO FILL:
 TRANSCRIPT:
 {transcript}
 
+---
+STAMPED TRANSCRIPT (numbered lines — use for "speaker_labels" field):
+{_numbered_stamped(stamped_transcript) if stamped_transcript else '(none)'}
+
 Return ONLY valid JSON. No markdown fences, no commentary outside the JSON.
 """
 
 
+def _numbered_stamped(stamped: str) -> str:
+    lines = [l for l in stamped.splitlines() if l.strip()]
+    return "\n".join(f"{i+1}. {l}" for i, l in enumerate(lines))
+
+
 def score(transcript: str, client_key: str, caller_name: str, call_date: str,
-          phone_number: str | None = None, facts: dict | None = None) -> dict:
+          phone_number: str | None = None, facts: dict | None = None,
+          stamped_transcript: str | None = None) -> dict:
     """
-    Pass 2 — grade the call and fill the lead template.
-    Uses json_object response format (guaranteed valid JSON, no schema compile
-    overhead) with a defensive parser fallback.
+    Pass 2 — grade the call, fill the lead template, AND return speaker labels
+    for the stamped transcript. Combining labeling into the scoring call kills
+    the old ~180s diarize call and adds only ~5s of output tokens.
     """
     client = get_client()
-    prompt = _build_prompt(transcript, client_key, caller_name, call_date, phone_number, facts)
+    prompt = _build_prompt(transcript, client_key, caller_name, call_date,
+                           phone_number, facts, stamped_transcript)
 
     response = client.chat.completions.create(
         model="gpt-4.1-mini",
@@ -804,36 +860,29 @@ def run(
             plain_transcript, stamped_transcript = transcribe(file_path)
             timings["transcribe_s"] = round(time.perf_counter() - t0, 2)
 
-            on_progress(60, "Analyzing (parallel: speakers + scoring)…")
+            on_progress(60, "Analyzing call (scoring + speakers)…")
             t0 = time.perf_counter()
 
-            # Time diarize and score individually — ThreadPoolExecutor hides
-            # that info by default. We wrap each call to record its own duration.
-            diarize_t: dict[str, float] = {}
-            score_t:   dict[str, float] = {}
+            # Single combined GPT call: scoring + speaker labels in one pass.
+            # Replaces the old separate diarize call which dominated wall time.
+            result = score(plain_transcript, client_key, caller_name, call_date,
+                           phone_number, None, stamped_transcript)
+            timings["score_s"] = round(time.perf_counter() - t0, 2)
+            timings["analyze_wall_s"] = timings["score_s"]
 
-            def _timed_diarize():
-                s = time.perf_counter()
-                r = diarize(stamped_transcript, caller_name, client_key)
-                diarize_t["s"] = round(time.perf_counter() - s, 2)
-                return r
-
-            def _timed_score():
-                s = time.perf_counter()
-                r = score(plain_transcript, client_key, caller_name, call_date,
-                          phone_number, None)
-                score_t["s"] = round(time.perf_counter() - s, 2)
-                return r
-
-            with ThreadPoolExecutor(max_workers=2) as ex:
-                f_labels = ex.submit(_timed_diarize)
-                f_result = ex.submit(_timed_score)
-                labels = f_labels.result()
-                result = f_result.result()
-
-            timings["diarize_s"]  = diarize_t.get("s", 0)
-            timings["score_s"]    = score_t.get("s", 0)
-            timings["analyze_wall_s"] = round(time.perf_counter() - t0, 2)
+            # Extract speaker labels from the combined response; fall back to
+            # alternation if GPT didn't include them or returned the wrong count.
+            stamped_line_count = len([
+                l for l in stamped_transcript.splitlines() if l.strip()
+            ])
+            raw_labels = result.get("speaker_labels") or []
+            labels = [
+                ("A" if str(x).strip().upper().startswith("A") else "P")
+                for x in raw_labels
+            ]
+            while len(labels) < stamped_line_count:
+                labels.append("A" if len(labels) % 2 == 0 else "P")
+            labels = labels[:stamped_line_count]
 
             labeled_transcript = build_labeled_transcript(stamped_transcript, labels)
 
@@ -880,8 +929,7 @@ def run(
                 100,
                 f"Done in {timings['total_s']}s "
                 f"(transcribe {timings['transcribe_s']}s · "
-                f"score {timings['score_s']}s · "
-                f"diarize {timings['diarize_s']}s)"
+                f"score {timings['score_s']}s)"
             )
             on_complete(result)
 

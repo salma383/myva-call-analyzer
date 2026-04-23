@@ -1,5 +1,5 @@
 {
-  "version": "1.6.5",
+  "version": "1.7.0",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Fix regression from 1.6.0: scoring prompt was still telling GPT to use extracted facts that no longer exist, which caused the model to skip the checklist and score fields and return only the lead template. Restored the clean v1.5 scoring prompt. Timing instrumentation from 1.6.4 is kept — log file at %LocalAppData%\\MyVA\\logs\\timing.log."
+  "release_notes": "Major speedup + transcript cleanup. (1) Killed the separate diarize GPT call — speaker labels are now returned by the scoring call in the same pass. Previous builds spent ~3 minutes on diarize alone; total analysis time should drop from ~3.5 min to ~1 min on a 4-min call. (2) Collapsed Whisper hallucination loops — repeated phrases like 'All right. All right. All right.' x20 during silence are now detected and deduped. (3) Speaker labels come from the scoring model that actually understands call context, so the inverted Agent/Prospect problem should be fixed."
 }
