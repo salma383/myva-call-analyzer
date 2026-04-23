@@ -1,5 +1,5 @@
 {
-  "version": "1.7.0",
+  "version": "1.8.0",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Major speedup + transcript cleanup. (1) Killed the separate diarize GPT call — speaker labels are now returned by the scoring call in the same pass. Previous builds spent ~3 minutes on diarize alone; total analysis time should drop from ~3.5 min to ~1 min on a 4-min call. (2) Collapsed Whisper hallucination loops — repeated phrases like 'All right. All right. All right.' x20 during silence are now detected and deduped. (3) Speaker labels come from the scoring model that actually understands call context, so the inverted Agent/Prospect problem should be fixed."
+  "release_notes": "Big speed + accuracy upgrade. (1) Transcription switched to Groq's whisper-large-v3 — runs on dedicated Whisper hardware ~10x faster than OpenAI, AND it's a newer more accurate model. Expect transcription to drop from ~30s to ~3-5s on a 4-min call. (2) Expanded Whisper vocabulary hint: added the full phonetic alphabet, email-shape examples, and all client/company names — Whisper now primed to preserve spelled names and email patterns. (3) New dedicated email-extraction GPT pass — runs in parallel with scoring whenever a spelled email is detected in the transcript, overrides the scoring pass's email with a verified version. Scoring + analysis still OpenAI GPT-4.1-mini — quality unchanged."
 }

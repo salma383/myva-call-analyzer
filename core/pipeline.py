@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Callable
 
-from config.api_manager import get_client
+from config.api_manager import get_client, get_groq_client
 from core.audio_prep import prepare_audio
 from shared.criteria import CLIENT_CRITERIA, LEAD_TEMPLATES, TEMP_LOGIC, WHISPER_VOCAB, WHISPER_HALLUCINATIONS
 
@@ -52,9 +52,11 @@ def _fmt_time(seconds: float) -> str:
 
 
 # Chunk size for parallel Whisper transcription.
-# ~3.5 min is a sweet spot: big enough that the API overhead is amortized,
-# small enough that 3-5 chunks fit in a long call and parallelize well.
-_CHUNK_MS = 3 * 60 * 1000 + 30 * 1000  # 3:30
+# With Groq (10x faster than OpenAI), a single 10-minute call finishes in a
+# few seconds — so we only chunk when calls exceed this. The pydub
+# slice+reencode overhead is ~1s per chunk, so keeping the chunk count low
+# on typical calls is a net win.
+_CHUNK_MS = 10 * 60 * 1000  # 10 min
 _MAX_PARALLEL_CHUNKS = 5
 # How far we'll nudge a chunk boundary to find a silent gap (either side).
 # Splitting on silence avoids cutting mid-word, which confuses Whisper at seams.
@@ -108,15 +110,21 @@ def _pick_chunk_boundaries(audio, chunk_ms: int, duration_ms: int) -> list[tuple
 
 
 def _transcribe_file(path: str, offset_sec: float):
-    """Transcribe a single audio file and return (text, offset-shifted segments)."""
-    client = get_client()
+    """
+    Transcribe a single audio file via Groq's whisper-large-v3.
+    Groq's LPU hardware runs Whisper ~10x faster than OpenAI, and large-v3 is
+    a newer/more accurate model than OpenAI's whisper-1.
+    Returns (text, offset-shifted segments).
+    """
+    client = get_groq_client()
     with open(path, "rb") as f:
         result = client.audio.transcriptions.create(
-            model="whisper-1",
+            model="whisper-large-v3",
             file=f,
             prompt=WHISPER_VOCAB,
             response_format="verbose_json",
             timestamp_granularities=["segment"],
+            temperature=0.0,
             timeout=120,
         )
 
@@ -127,8 +135,15 @@ def _transcribe_file(path: str, offset_sec: float):
     segments = getattr(result, "segments", None) or []
     shifted = []
     for seg in segments:
-        start = getattr(seg, "start", 0.0) + offset_sec
-        text  = getattr(seg, "text", "").strip()
+        # Groq returns segments as dicts; OpenAI as objects. Handle both.
+        if isinstance(seg, dict):
+            start = seg.get("start", 0.0)
+            text = seg.get("text", "")
+        else:
+            start = getattr(seg, "start", 0.0)
+            text = getattr(seg, "text", "")
+        start = (start or 0.0) + offset_sec
+        text = (text or "").strip()
         if text:
             shifted.append((start, text))
     return raw_text.strip(), shifted
@@ -687,6 +702,97 @@ def score(transcript: str, client_key: str, caller_name: str, call_date: str,
         return {"error": "Failed to parse GPT response", "raw": raw}
 
 
+# ─── Dedicated email extraction pass ──────────────────────────────────────────
+
+def _looks_like_spelled_email(transcript: str) -> bool:
+    """
+    Cheap detector — only run the dedicated email pass if the transcript
+    actually contains spelled-out letters or an 'at <domain>' pattern.
+    """
+    t = transcript.lower()
+    # "at gmail", "at yahoo", "at outlook", "at hotmail", "dot com"
+    if re.search(r'\b(?:at\s+(?:gmail|yahoo|outlook|hotmail|aol|icloud|me|proton)|dot\s+(?:com|net|org|co|io))\b', t):
+        return True
+    # Hyphenated single-letter sequence ("D-U-S-T-I-N")
+    if re.search(r'\b[a-z](?:-[a-z]){2,}\b', t):
+        return True
+    # 3+ phonetic words in a row
+    phonetic = r'(?:alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliet|kilo|lima|mike|november|oscar|papa|quebec|romeo|sierra|tango|uniform|victor|whiskey|x-ray|yankee|zulu)'
+    if re.search(rf'\b{phonetic}\s+{phonetic}\s+{phonetic}\b', t):
+        return True
+    # Already-present email shape (from Whisper's own detection)
+    if re.search(r'\b[\w.+\-]+@[\w.\-]+\.[a-z]{2,}\b', t):
+        return True
+    return False
+
+
+def extract_email(transcript: str) -> str | None:
+    """
+    Focused GPT pass dedicated to resolving the prospect's email address.
+    Runs in parallel with scoring, only when the transcript shows signs of
+    spelled letters / phonetic dictation / 'at <domain>' patterns.
+    Returns a single email string, or None if no email was given.
+    """
+    client = get_client()
+
+    prompt = f"""You resolve a SINGLE email address from a phone call transcript.
+
+Rules — follow exactly:
+1. If the prospect was asked for an email but did NOT give one, return null.
+2. If letters were spelled phonetically ("sierra alpha romeo alpha" or "S as in Sam, A as in apple"), JOIN the letters into one word.
+3. If letters were spelled hyphen-style ("D-U-S-T-I-N"), join into one word.
+4. "at <Company>" or "at <Company> dot com" = "@company.com".
+5. "dot" between name parts = literal dot (e.g. "john dot smith" = "john.smith").
+6. If the prospect CORRECTED themselves ("not plural", "without the s", "actually it's...", "I mean..."), use the CORRECTED version, never the original.
+7. The prospect's spelling overrides the agent's readback — if the agent reads it back and the prospect says "yes" or confirms, that's the final version.
+8. Always lowercase the final email.
+9. If multiple emails appear, return the PROSPECT's (not the agent's / company's).
+
+Return JSON with exactly this shape:
+  {{ "email": "<resolved email, lowercased>" or null, "confidence": "high" | "medium" | "low" }}
+
+TRANSCRIPT:
+{transcript}
+"""
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            timeout=45,
+        )
+        data = json.loads(resp.choices[0].message.content or "{}")
+        email = data.get("email")
+        if email and isinstance(email, str):
+            email = email.strip().lower()
+            # Sanity check — must look like an email
+            if re.fullmatch(r'[\w.+\-]+@[\w.\-]+\.[a-z]{2,}', email):
+                return email
+        return None
+    except Exception:
+        return None
+
+
+def _inject_email(template_text: str, email: str) -> str:
+    """
+    Overwrite any Email / Email Address / E-mail field in the lead template
+    with the resolved email from the dedicated extraction pass.
+    """
+    patterns = [
+        r'^(\s*Email Address\s*:)\s*.*$',
+        r'^(\s*E-?mail\s*:)\s*.*$',
+    ]
+    for pat in patterns:
+        template_text = re.sub(
+            pat,
+            lambda m: f"{m.group(1)} {email}",
+            template_text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+    return template_text
+
+
 # ─── Speaker diarization (agent vs prospect) ──────────────────────────────────
 
 def diarize(stamped_transcript: str, caller_name: str, client_key: str) -> list[str]:
@@ -860,15 +966,49 @@ def run(
             plain_transcript, stamped_transcript = transcribe(file_path)
             timings["transcribe_s"] = round(time.perf_counter() - t0, 2)
 
-            on_progress(60, "Analyzing call (scoring + speakers)…")
+            on_progress(60, "Analyzing call (scoring + speakers + email)…")
             t0 = time.perf_counter()
 
-            # Single combined GPT call: scoring + speaker labels in one pass.
-            # Replaces the old separate diarize call which dominated wall time.
-            result = score(plain_transcript, client_key, caller_name, call_date,
-                           phone_number, None, stamped_transcript)
-            timings["score_s"] = round(time.perf_counter() - t0, 2)
-            timings["analyze_wall_s"] = timings["score_s"]
+            # Scoring (with combined speaker labels). If the transcript looks
+            # like an email was dictated, run a dedicated email-extraction
+            # pass in parallel — free wall time since score takes longer.
+            needs_email = _looks_like_spelled_email(plain_transcript)
+            score_t: dict[str, float] = {}
+            email_t: dict[str, float] = {}
+
+            def _timed_score():
+                s = time.perf_counter()
+                r = score(plain_transcript, client_key, caller_name, call_date,
+                          phone_number, None, stamped_transcript)
+                score_t["s"] = round(time.perf_counter() - s, 2)
+                return r
+
+            def _timed_email():
+                s = time.perf_counter()
+                r = extract_email(plain_transcript)
+                email_t["s"] = round(time.perf_counter() - s, 2)
+                return r
+
+            verified_email = None
+            if needs_email:
+                with ThreadPoolExecutor(max_workers=2) as ex:
+                    f_result = ex.submit(_timed_score)
+                    f_email = ex.submit(_timed_email)
+                    result = f_result.result()
+                    verified_email = f_email.result()
+            else:
+                result = _timed_score()
+
+            timings["score_s"] = score_t.get("s", 0)
+            timings["email_s"] = email_t.get("s", 0) if needs_email else 0
+            timings["analyze_wall_s"] = round(time.perf_counter() - t0, 2)
+
+            # Override the scoring pass's email with the verified one
+            if verified_email and result.get("lead_template"):
+                result["lead_template"] = _inject_email(
+                    result["lead_template"], verified_email
+                )
+                result["verified_email"] = verified_email
 
             # Extract speaker labels from the combined response; fall back to
             # alternation if GPT didn't include them or returned the wrong count.
@@ -925,11 +1065,14 @@ def run(
             result["_timings"] = timings
 
             # Surface the breakdown right in the "Done" message so it's visible
+            email_suffix = (
+                f" · email {timings['email_s']}s" if timings.get("email_s") else ""
+            )
             on_progress(
                 100,
                 f"Done in {timings['total_s']}s "
                 f"(transcribe {timings['transcribe_s']}s · "
-                f"score {timings['score_s']}s)"
+                f"score {timings['score_s']}s{email_suffix})"
             )
             on_complete(result)
 
