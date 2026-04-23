@@ -3,7 +3,7 @@ App version — bump this number before every build you distribute.
 Also update version.json in your GitHub repo so users get prompted.
 """
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 
 # Raw URL to version.json in your public GitHub repo.
 # After you push to GitHub, replace this with your actual URL.

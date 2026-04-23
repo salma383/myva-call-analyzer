@@ -62,8 +62,8 @@ class ResultsPanel(ctk.CTkFrame):
         ).pack(side="left", padx=(0, 6))
 
         self.mv_entry = ctk.CTkEntry(
-            self.mv_frame, width=130, height=32,
-            placeholder_text="e.g. $280,000",
+            self.mv_frame, width=150, height=32,
+            placeholder_text="$280,000  or  N/A",
             fg_color=BG_INPUT, border_color=BORDER,
             text_color=TEXT_PRIMARY, placeholder_text_color=TEXT_MUTED,
             corner_radius=8,
@@ -143,8 +143,53 @@ class ResultsPanel(ctk.CTkFrame):
     # ── Transcript tab ────────────────────────────────────────────────────────
 
     def _build_transcript_tab(self):
+        # ── Audio player row (play while reading) ──────────────────────────
+        self.audio_frame = ctk.CTkFrame(self._tab_transcript, fg_color=BG_INPUT,
+                                        corner_radius=8, border_width=1,
+                                        border_color=BORDER)
+        self.audio_frame.pack(fill="x", padx=12, pady=(10, 0))
+
+        self.play_btn = ctk.CTkButton(
+            self.audio_frame, text="▶", width=40, height=32,
+            fg_color=ACCENT_DIM, hover_color=ACCENT,
+            text_color=ACCENT_LIGHT,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=6,
+            command=self._toggle_play,
+            state="disabled",
+        )
+        self.play_btn.pack(side="left", padx=6, pady=6)
+
+        self.audio_time_label = ctk.CTkLabel(
+            self.audio_frame, text="—:—  /  —:—",
+            font=ctk.CTkFont(family=FONT_MONO, size=11),
+            text_color=TEXT_MUTED,
+            width=95,
+        )
+        self.audio_time_label.pack(side="left", padx=(4, 8))
+
+        # CTkSlider for seek
+        self.audio_seek = ctk.CTkSlider(
+            self.audio_frame, from_=0, to=1,
+            number_of_steps=1000,
+            fg_color=BG_CARD, progress_color=ACCENT,
+            button_color=ACCENT, button_hover_color=ACCENT_LIGHT,
+            command=self._on_seek,
+        )
+        self.audio_seek.set(0)
+        self.audio_seek.pack(side="left", fill="x", expand=True, padx=(4, 10), pady=6)
+
+        # Audio player state
+        self._audio_loaded = False
+        self._audio_duration = 0.0
+        self._audio_paused = False
+        self._audio_seek_dragging = False
+        self._audio_seek_offset = 0.0  # seconds offset due to user-initiated seek
+        self._audio_tick_job = None
+
+        # Top controls row (Copy Transcript button)
         top = ctk.CTkFrame(self._tab_transcript, fg_color="transparent")
-        top.pack(fill="x", padx=12, pady=(10, 6))
+        top.pack(fill="x", padx=12, pady=(8, 6))
 
         ctk.CTkButton(
             top, text="Copy Transcript",
@@ -195,11 +240,27 @@ class ResultsPanel(ctk.CTkFrame):
         )
 
     def recalculate_temp(self, mv: str):
+        """
+        Recalculate temperature when the user enters a market value.
+
+        Accepts:
+          - A number (with or without $, commas) → run the AP-vs-MV math
+          - "N/A", "None", "none", "n/a" → lock in the GPT's preliminary temp
+            as final (useful when the property isn't on Zillow / Redfin).
+        """
         if not self._result:
             return
 
         result = self._result
         result["mv"] = mv
+
+        # "N/A" / "None" → keep GPT's preliminary temp, mark as confirmed final
+        if mv.strip().lower() in ("n/a", "na", "none", "n.a.", "n/a."):
+            result["mv"] = "N/A"
+            result["temp_is_preliminary"] = False
+            # preliminary_temp stays as-is (GPT's best call)
+            self._render_results(result)
+            return
 
         def _parse(s):
             cleaned = _re.sub(r'[^\d.]', '', str(s))
@@ -230,6 +291,7 @@ class ResultsPanel(ctk.CTkFrame):
             new_temp = result.get("preliminary_temp", "Cold")
 
         result["preliminary_temp"] = new_temp
+        result["temp_is_preliminary"] = False
         self._render_results(result)
 
     # ── Pipeline callbacks ────────────────────────────────────────────────────
@@ -241,6 +303,10 @@ class ResultsPanel(ctk.CTkFrame):
     def _on_complete(self, result: dict):
         self._result = result
         self.after(0, lambda: self._render_results(result))
+        # Load audio into the in-app player
+        audio_path = result.get("audio_path")
+        if audio_path:
+            self.after(0, lambda p=audio_path: self._load_audio(p))
         if self._on_done_cb:
             self.after(0, self._on_done_cb)
         try:
@@ -439,7 +505,10 @@ class ResultsPanel(ctk.CTkFrame):
         if temp:
             tc = TEMP_COLORS.get(temp.lower(), GRAY)
             temp_text = temp
-            if not result.get("mv"):
+            # Preliminary only when GPT flagged it AND user hasn't entered MV (or N/A)
+            is_prelim = result.get("temp_is_preliminary", True)
+            has_mv_decision = bool(result.get("mv"))
+            if is_prelim and not has_mv_decision:
                 temp_text += "  ·  Preliminary"
             temp_row = ctk.CTkFrame(hero, fg_color="transparent")
             temp_row.pack(pady=(0, 16))
@@ -525,6 +594,170 @@ class ResultsPanel(ctk.CTkFrame):
         if mv:
             self.on_mv_saved(mv)
 
+    # ── Audio player (Windows MCI via ctypes — no external deps) ──────────────
+
+    def _mci(self, command: str) -> str:
+        """Send a Windows MCI command. Returns response string (empty on error)."""
+        import ctypes
+        buf = ctypes.create_unicode_buffer(255)
+        ctypes.windll.winmm.mciSendStringW(command, buf, 254, 0)
+        return buf.value
+
+    def _load_audio(self, audio_path: str):
+        """
+        Load the call audio via Windows MCI. Supports mp3/wav natively; other
+        formats are transcoded to wav via pydub (already a dep).
+        """
+        if not audio_path:
+            return
+        # Close any previously-loaded audio
+        try:
+            self._mci("close myaudio")
+        except Exception:
+            pass
+
+        import os, tempfile
+        load_path = audio_path
+        self._audio_tempfile = None
+        ext = os.path.splitext(audio_path)[1].lower()
+
+        # MCI has good native support for mp3/wav. Other formats (m4a, flac,
+        # webm, ogg) — transcode to a temp wav once for reliable playback.
+        if ext not in (".mp3", ".wav"):
+            try:
+                from pydub import AudioSegment
+                seg = AudioSegment.from_file(audio_path)
+                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                tmp.close()
+                seg.export(tmp.name, format="wav")
+                load_path = tmp.name
+                self._audio_tempfile = tmp.name
+            except Exception:
+                self._audio_loaded = False
+                self.play_btn.configure(state="disabled")
+                self.audio_time_label.configure(text="(audio unavailable)")
+                return
+
+        try:
+            # MCI chokes on spaces / unicode in paths unless quoted. Use short
+            # 8.3 path if available (always works), else quoted.
+            try:
+                import ctypes
+                buf = ctypes.create_unicode_buffer(260)
+                ctypes.windll.kernel32.GetShortPathNameW(load_path, buf, 260)
+                short = buf.value or load_path
+            except Exception:
+                short = load_path
+            # Open with explicit type for reliability
+            mci_type = "mpegvideo" if load_path.lower().endswith(".mp3") else "waveaudio"
+            resp = self._mci(f'open "{short}" type {mci_type} alias myaudio')
+            self._mci("set myaudio time format milliseconds")
+            length_str = self._mci("status myaudio length")
+            self._audio_duration = (int(length_str) / 1000.0) if length_str.isdigit() else 0.0
+
+            self._audio_loaded = True
+            self._audio_paused = False
+            self.audio_seek.set(0)
+            self.play_btn.configure(state="normal", text="▶")
+            self._update_time_label(0.0)
+        except Exception:
+            self._audio_loaded = False
+            self.play_btn.configure(state="disabled")
+            self.audio_time_label.configure(text="(audio unavailable)")
+
+    def _toggle_play(self):
+        if not self._audio_loaded:
+            return
+        mode = self._mci("status myaudio mode").strip()
+        if mode == "playing":
+            self._mci("pause myaudio")
+            self._audio_paused = True
+            self.play_btn.configure(text="▶")
+        else:
+            # "paused" → resume; anything else (stopped/finished) → play from seek pos
+            self._mci("play myaudio")
+            self._audio_paused = False
+            self.play_btn.configure(text="⏸")
+            self._schedule_audio_tick()
+
+    def _on_seek(self, frac):
+        if not self._audio_loaded or self._audio_duration <= 0:
+            return
+        new_ms = int(float(frac) * self._audio_duration * 1000)
+        mode = self._mci("status myaudio mode").strip()
+        was_playing = (mode == "playing")
+        # MCI: "play from <ms>" resumes playback from that position
+        if was_playing:
+            self._mci(f"play myaudio from {new_ms}")
+        else:
+            self._mci(f"seek myaudio to {new_ms}")
+        self._update_time_label(new_ms / 1000.0)
+
+    def _schedule_audio_tick(self):
+        if self._audio_tick_job:
+            try:
+                self.after_cancel(self._audio_tick_job)
+            except Exception:
+                pass
+        self._audio_tick_job = self.after(250, self._audio_tick)
+
+    def _audio_tick(self):
+        if not self._audio_loaded:
+            return
+        try:
+            if self._audio_paused:
+                return
+            mode = self._mci("status myaudio mode").strip()
+            if mode != "playing":
+                # Reached end — reset to start
+                self.play_btn.configure(text="▶")
+                self.audio_seek.set(0)
+                self._update_time_label(0.0)
+                return
+            pos_str = self._mci("status myaudio position")
+            current = (int(pos_str) / 1000.0) if pos_str.isdigit() else 0.0
+            if self._audio_duration > 0:
+                self.audio_seek.set(min(1.0, current / self._audio_duration))
+            self._update_time_label(current)
+        finally:
+            self._audio_tick_job = self.after(250, self._audio_tick)
+
+    def _update_time_label(self, current_s: float):
+        def _fmt(s):
+            m, s = divmod(int(max(0, s)), 60)
+            return f"{m}:{s:02d}"
+        total = self._audio_duration
+        self.audio_time_label.configure(
+            text=f"{_fmt(current_s)}  /  {_fmt(total)}"
+        )
+
+    def _stop_audio(self):
+        if self._audio_loaded:
+            try:
+                self._mci("stop myaudio")
+                self._mci("close myaudio")
+            except Exception:
+                pass
+        self._audio_paused = False
+        self.audio_seek.set(0)
+        self.play_btn.configure(text="▶")
+        if self._audio_tick_job:
+            try:
+                self.after_cancel(self._audio_tick_job)
+            except Exception:
+                pass
+            self._audio_tick_job = None
+        # Clean up transcoded temp
+        tmp = getattr(self, "_audio_tempfile", None)
+        if tmp:
+            try:
+                import os
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except Exception:
+                pass
+            self._audio_tempfile = None
+
     def _copy_template(self):
         text = self.template_box.get("1.0", "end").strip()
         self.clipboard_clear()
@@ -543,6 +776,18 @@ class ResultsPanel(ctk.CTkFrame):
 
     def _clear(self):
         self._result = None
+        # Stop any playing audio from a previous analysis
+        try:
+            self._stop_audio()
+        except Exception:
+            pass
+        self._audio_loaded = False
+        try:
+            self.play_btn.configure(state="disabled", text="▶")
+            self.audio_seek.set(0)
+            self.audio_time_label.configure(text="—:—  /  —:—")
+        except Exception:
+            pass
         self._clear_content()
 
     def _clear_content(self):

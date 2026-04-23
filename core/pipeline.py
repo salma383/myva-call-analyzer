@@ -118,19 +118,27 @@ def _transcribe_file(path: str, offset_sec: float):
     """
     client = get_groq_client()
     with open(path, "rb") as f:
+        # NOTE: we intentionally do NOT set temperature here. Whisper's default
+        # uses a temperature-fallback chain (0.0 → 0.2 → 0.4 → 0.6 → 0.8 → 1.0),
+        # retrying failed segments at rising temps. Pinning temperature=0 kills
+        # that fallback and causes Whisper to emit NOTHING for hard segments
+        # instead of retrying — which manifests as "missing lines" in the
+        # transcript. Default behavior is the reliable one.
         result = client.audio.transcriptions.create(
             model="whisper-large-v3",
             file=f,
             prompt=WHISPER_VOCAB,
+            language="en",
             response_format="verbose_json",
             timestamp_granularities=["segment"],
-            temperature=0.0,
             timeout=120,
         )
 
     raw_text = result.text if hasattr(result, "text") else str(result)
-    for phrase in WHISPER_HALLUCINATIONS:
-        raw_text = raw_text.replace(phrase, "")
+    # NOTE: we no longer substring-delete hallucination phrases from raw_text.
+    # Substring deletion could mutilate real speech that happened to contain
+    # those words. Hallucinations are filtered at the SEGMENT level below
+    # (drop a segment only if its entire body IS a known hallucination).
 
     segments = getattr(result, "segments", None) or []
     shifted = []
@@ -205,8 +213,11 @@ def transcribe(file_path: str) -> tuple[str, str]:
         if shifted_segments:
             lines = []
             for start, text in shifted_segments:
-                for phrase in WHISPER_HALLUCINATIONS:
-                    text = text.replace(phrase, "")
+                # Drop segments that ARE a known hallucination phrase; never
+                # mutilate by substring-replace on real speech.
+                stripped = text.strip().lower().rstrip(".!?,")
+                if any(stripped == h.lower().rstrip(".!?,") for h in WHISPER_HALLUCINATIONS):
+                    continue
                 text = reconstruct_spelled_out(text.strip())
                 if text:
                     lines.append(f"[{_fmt_time(start)}] {text}")
@@ -614,9 +625,18 @@ Analyze the following call transcript and return a JSON object with these keys:
    - Read the ENTIRE conversation after the email is first given to check for any correction.
    - When in doubt, use the LAST version the prospect confirmed.
 
-6. "preliminary_temp": one of Hot / Warm / Cold / Nurture / Throwaway (real estate only, else null)
+6. "preliminary_temp": one of Hot / Warm / Cold / Nurture / Throwaway (real estate only, else null).
+   ALWAYS return your best concrete pick based on the info you DO have — motivation, timeline,
+   asking price, open-to-listing, seller attitude. Do NOT refuse to pick because MV is unknown.
+   Market Value is recalculated later if the user provides it; your job here is to emit the
+   best temperature the audible call justifies.
    Use this logic:
 {TEMP_LOGIC}
+
+6b. "temp_is_preliminary": boolean. True ONLY if MV would meaningfully change your pick
+    (i.e. the final temp depends on AP-vs-MV comparison). False if the call has a hard
+    disqualifier, no valid motive, very long timeline, throwaway behavior, or any signal
+    strong enough that MV cannot move the answer.
 
 7. "coaching_notes": 2–4 short bullet points of specific feedback for this agent on this call
 
@@ -1057,6 +1077,7 @@ def run(
             result["stamped_transcript"] = stamped_transcript
             result["labeled_transcript"] = labeled_transcript
             result["phone_number"] = phone_number
+            result["audio_path"] = file_path
             result["file"] = os.path.basename(file_path)
             result["client"] = client_key
             result["caller_name"] = caller_name

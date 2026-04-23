@@ -447,23 +447,19 @@ UNIVERSAL_RULES = [
 # ─── Whisper vocabulary hint ──────────────────────────────────────────────────
 
 WHISPER_VOCAB = (
-    # Real-estate / acquisitions terms
-    "mortgage, equity, foreclosure, tax lien, sqft, square feet, "
-    "owner-occupied, Zillow, MLS, realtor, cash offer, escrow, HOA, "
-    "appraisal, ARV, CapEx, multifamily, duplex, triplex, EBITDA, "
-    "asking price, motivated seller, as-is, wholesale, close fast, "
-    # Client/company names
-    "ReSimpli, HubSpot, GHL, Dealonomy, Barracuda, Haven Senior, "
-    "Biancardi, Smithton, Boone, CIC Partners, Giancarlo, Shiraz, "
-    "Premier Site Solutions, Sir Charles, Scott Fuller, "
-    # Phonetic alphabet — primes Whisper to preserve spelling patterns
+    # Keep this balanced and short (~80 tokens). Heavy email-shape primers
+    # were biasing Whisper to pattern-match and drop non-email speech.
+    # Domain terms — helps with rare words Whisper has seen less often
+    "Zillow, MLS, realtor, duplex, triplex, multifamily, Zestimate, "
+    "ARV, HOA, escrow, wholesale, "
+    # Client / company names so they come out right
+    "ReSimpli, HubSpot, Dealonomy, Haven Senior, Biancardi, Smithton, "
+    "Boone, CIC Partners, Giancarlo, Shiraz, Premier Site Solutions, "
+    "Sir Charles, Scott Fuller, "
+    # Phonetic alphabet — preserves spelled names/emails without biasing
     "alpha, bravo, charlie, delta, echo, foxtrot, golf, hotel, india, "
     "juliet, kilo, lima, mike, november, oscar, papa, quebec, romeo, "
-    "sierra, tango, uniform, victor, whiskey, x-ray, yankee, zulu, "
-    # Email shape examples — teaches Whisper the at/dot conventions
-    "john@gmail.com, sarah.smith@yahoo.com, mike123@outlook.com, "
-    "dustin.brooks@doubledoutfitters.com, at gmail dot com, at yahoo dot com, "
-    "D-U-S-T-I-N, J-O-H-N, at Gmail, at Yahoo, at Hotmail, at Outlook"
+    "sierra, tango, uniform, victor, whiskey, yankee, zulu"
 )
 
 WHISPER_HALLUCINATIONS = [
