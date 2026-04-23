@@ -2,6 +2,7 @@ import os
 import json
 import threading
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Callable
@@ -772,27 +773,50 @@ def run(
 
     def _work():
         try:
-            on_progress(10, "Preparing audio…")
+            # ── TIMING INSTRUMENTATION ─────────────────────────────────────
+            timings: dict[str, float] = {}
+            t_total = time.perf_counter()
 
-            # Extract phone from filename up-front so GPT can use it
+            on_progress(10, "Preparing audio…")
+            t0 = time.perf_counter()
             phone_number = extract_phone_from_filename(file_path)
+            timings["phone_extract_s"] = round(time.perf_counter() - t0, 2)
 
             on_progress(25, "Transcribing (Whisper)…")
+            t0 = time.perf_counter()
             plain_transcript, stamped_transcript = transcribe(file_path)
+            timings["transcribe_s"] = round(time.perf_counter() - t0, 2)
 
-            # 2-way parallel: diarize || score. Running a 3rd concurrent chat
-            # completion (fact extraction) triggered hidden rate-limit retry
-            # loops on some OpenAI tiers that made the pipeline appear hung.
             on_progress(60, "Analyzing (parallel: speakers + scoring)…")
+            t0 = time.perf_counter()
+
+            # Time diarize and score individually — ThreadPoolExecutor hides
+            # that info by default. We wrap each call to record its own duration.
+            diarize_t: dict[str, float] = {}
+            score_t:   dict[str, float] = {}
+
+            def _timed_diarize():
+                s = time.perf_counter()
+                r = diarize(stamped_transcript, caller_name, client_key)
+                diarize_t["s"] = round(time.perf_counter() - s, 2)
+                return r
+
+            def _timed_score():
+                s = time.perf_counter()
+                r = score(plain_transcript, client_key, caller_name, call_date,
+                          phone_number, None)
+                score_t["s"] = round(time.perf_counter() - s, 2)
+                return r
 
             with ThreadPoolExecutor(max_workers=2) as ex:
-                f_labels = ex.submit(diarize, stamped_transcript, caller_name, client_key)
-                f_result = ex.submit(
-                    score, plain_transcript, client_key, caller_name, call_date,
-                    phone_number, None,
-                )
+                f_labels = ex.submit(_timed_diarize)
+                f_result = ex.submit(_timed_score)
                 labels = f_labels.result()
                 result = f_result.result()
+
+            timings["diarize_s"]  = diarize_t.get("s", 0)
+            timings["score_s"]    = score_t.get("s", 0)
+            timings["analyze_wall_s"] = round(time.perf_counter() - t0, 2)
 
             labeled_transcript = build_labeled_transcript(stamped_transcript, labels)
 
@@ -801,6 +825,27 @@ def run(
             # Safety-net: force the phone into the filled template even if GPT missed it
             if phone_number and result.get("lead_template"):
                 result["lead_template"] = _inject_phone(result["lead_template"], phone_number)
+
+            timings["total_s"] = round(time.perf_counter() - t_total, 2)
+
+            # Write a per-run timing entry that the user can share with me.
+            try:
+                log_dir = os.path.join(
+                    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+                    "MyVA", "logs",
+                )
+                os.makedirs(log_dir, exist_ok=True)
+                log_path = os.path.join(log_dir, "timing.log")
+                entry = {
+                    "when": datetime.now().isoformat(timespec="seconds"),
+                    "file": os.path.basename(file_path),
+                    "client": client_key,
+                    **timings,
+                }
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry) + "\n")
+            except Exception:
+                pass  # logging must never break analysis
 
             result["transcript"] = plain_transcript
             result["stamped_transcript"] = stamped_transcript
@@ -811,8 +856,16 @@ def run(
             result["caller_name"] = caller_name
             result["call_date"] = call_date
             result["analyzed_at"] = datetime.now().isoformat()
+            result["_timings"] = timings
 
-            on_progress(100, "Done")
+            # Surface the breakdown right in the "Done" message so it's visible
+            on_progress(
+                100,
+                f"Done in {timings['total_s']}s "
+                f"(transcribe {timings['transcribe_s']}s · "
+                f"score {timings['score_s']}s · "
+                f"diarize {timings['diarize_s']}s)"
+            )
             on_complete(result)
 
         except Exception as exc:

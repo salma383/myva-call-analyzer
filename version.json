@@ -1,5 +1,5 @@
 {
-  "version": "1.6.3",
+  "version": "1.6.4",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Fixes the hang at the 'Analyzing' stage. Removed the extra fact-extraction GPT call — running three concurrent chat completions triggered silent rate-limit retries on some OpenAI tiers, making the pipeline appear stuck. Back to the v1.5 2-concurrent pattern (diarize + score). Silence-aware chunking and per-call timeouts are kept."
+  "release_notes": "Diagnostic release — no behaviour changes. Adds timing measurements for each pipeline stage so we can see exactly where the seconds go. The 'Done' message now shows a per-stage breakdown."
 }
