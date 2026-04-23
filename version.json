@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
+  "version": "1.6.0",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Much faster analysis — long audio is now split into chunks and transcribed in parallel (up to 5 concurrent Whisper calls), so a 10-minute call finishes in roughly the time a 3-minute one used to. Stronger Windows taskbar icon binding so the MyVA logo shows reliably."
+  "release_notes": "Smarter analysis. Audio chunks now split on silent gaps (cleaner transcripts at the seams). Scoring output is enforced by a strict JSON schema so it never fails to parse. Added a two-pass flow: a fact-extraction pass runs before scoring so the lead template is filled from facts the prospect literally stated rather than the model's guesses — significantly less hallucination."
 }

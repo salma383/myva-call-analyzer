@@ -55,6 +55,55 @@ def _fmt_time(seconds: float) -> str:
 # small enough that 3-5 chunks fit in a long call and parallelize well.
 _CHUNK_MS = 3 * 60 * 1000 + 30 * 1000  # 3:30
 _MAX_PARALLEL_CHUNKS = 5
+# How far we'll nudge a chunk boundary to find a silent gap (either side).
+# Splitting on silence avoids cutting mid-word, which confuses Whisper at seams.
+_SILENCE_SEARCH_MS = 10 * 1000
+_MIN_SILENCE_MS = 350
+
+
+def _pick_chunk_boundaries(audio, chunk_ms: int, duration_ms: int) -> list[tuple[int, int]]:
+    """
+    Return a list of (start_ms, end_ms) chunk ranges that prefer silent gaps
+    as split points. Falls back to a hard split if no silence is found nearby.
+    """
+    from pydub.silence import detect_silence
+
+    # Threshold relative to overall loudness — robust across different recordings
+    try:
+        thresh = audio.dBFS - 16
+    except Exception:
+        thresh = -40
+
+    boundaries: list[int] = [0]
+    cursor = 0
+    while cursor + chunk_ms < duration_ms:
+        target = cursor + chunk_ms
+        search_start = max(target - _SILENCE_SEARCH_MS, cursor + chunk_ms // 2)
+        search_end   = min(target + _SILENCE_SEARCH_MS, duration_ms)
+        region = audio[search_start:search_end]
+
+        split_point = target  # fallback
+        try:
+            silences = detect_silence(
+                region,
+                min_silence_len=_MIN_SILENCE_MS,
+                silence_thresh=thresh,
+            )
+            if silences:
+                # Pick silence whose midpoint is closest to the target split
+                def _mid_offset(s):
+                    mid = search_start + (s[0] + s[1]) // 2
+                    return abs(mid - target)
+                best = min(silences, key=_mid_offset)
+                split_point = search_start + (best[0] + best[1]) // 2
+        except Exception:
+            pass  # pydub/ffmpeg hiccup — just use the hard boundary
+
+        boundaries.append(split_point)
+        cursor = split_point
+
+    boundaries.append(duration_ms)
+    return list(zip(boundaries[:-1], boundaries[1:]))
 
 
 def _transcribe_file(path: str, offset_sec: float):
@@ -102,11 +151,10 @@ def transcribe(file_path: str) -> tuple[str, str]:
         if duration_ms <= _CHUNK_MS:
             raw_text, shifted_segments = _transcribe_file(prepped_path, 0.0)
         else:
-            # Slice into chunks, write each to a temp mp3, transcribe in parallel
+            # Slice into silence-aligned chunks and transcribe in parallel
+            ranges = _pick_chunk_boundaries(audio, _CHUNK_MS, duration_ms)
             chunk_paths: list[tuple[str, float]] = []
-            starts = list(range(0, duration_ms, _CHUNK_MS))
-            for start_ms in starts:
-                end_ms = min(start_ms + _CHUNK_MS, duration_ms)
+            for start_ms, end_ms in ranges:
                 slice_ = audio[start_ms:end_ms]
                 tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
                 tmp.close()
@@ -310,10 +358,145 @@ def _extract_emails_from_text(text: str) -> list[str]:
     return re.findall(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b', text)
 
 
-# ─── GPT scoring ──────────────────────────────────────────────────────────────
+# ─── Pass 1: Fact extraction ──────────────────────────────────────────────────
+#
+# This runs BEFORE scoring. It pulls only facts the prospect literally said —
+# no inference, no fabrication. The second pass then fills the template from
+# these extracted facts instead of re-reading the transcript, which massively
+# cuts hallucination (e.g. inventing an asking price that was never mentioned).
+
+_FACTS_SCHEMA = {
+    "name": "call_facts",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "prospect_name":     {"type": ["string", "null"]},
+            "prospect_email":    {"type": ["string", "null"]},
+            "prospect_phone":    {"type": ["string", "null"]},
+            "property_address":  {"type": ["string", "null"]},
+            "property_type":     {"type": ["string", "null"]},
+            "business_type":     {"type": ["string", "null"]},
+            "asking_price":      {"type": ["number", "null"]},
+            "motivation":        {"type": ["string", "null"]},
+            "timeline_months":   {"type": ["number", "null"]},
+            "open_to_listing":   {"type": ["boolean", "null"]},
+            "other_notes":       {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [
+            "prospect_name", "prospect_email", "prospect_phone",
+            "property_address", "property_type", "business_type",
+            "asking_price", "motivation", "timeline_months",
+            "open_to_listing", "other_notes",
+        ],
+    },
+}
+
+
+def extract_facts(transcript: str, client_key: str) -> dict:
+    """
+    Pass 1 — extract only explicitly-stated facts from the transcript.
+    Returns a dict matching _FACTS_SCHEMA. Values are null when the prospect
+    did not literally state them (no inference allowed).
+    """
+    client = get_client()
+
+    criteria = CLIENT_CRITERIA[client_key]
+    is_re = criteria["type"] == "real_estate"
+    domain_hint = (
+        "This is a REAL ESTATE outreach call. 'property_address' and 'property_type' "
+        "are the target property. 'business_type' should be null."
+        if is_re else
+        "This is a BUSINESS-ACQUISITIONS outreach call. 'business_type' is the target "
+        "business. 'property_address' and 'property_type' are usually null unless the "
+        "business includes real estate."
+    )
+
+    prompt = f"""Extract ONLY facts the prospect literally stated in this cold-call transcript.
+
+Rules — read carefully:
+- DO NOT infer, guess, or fill in plausible values. If unstated, return null.
+- Do not invent asking prices or timelines.
+- For emails: reconstruct from phonetic spelling / dot-spelling / "at [company]" conventions.
+  * "sierra alpha romeo alpha at gmail dot com" → "sara@gmail.com"
+  * "D-U-S-T-I-N at DoubleDOutfitters.com" → "dustin@doubledoutfitters.com"
+  * If the prospect corrected themselves ("not plural", "actually..."), use the CORRECTED version.
+- If asked a yes/no question and the prospect gave no clear answer, return null (not false).
+- "other_notes" = array of any other prospect-stated details that don't fit the named fields.
+
+{domain_hint}
+
+TRANSCRIPT:
+{transcript}
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
+        response_format={"type": "json_schema", "json_schema": _FACTS_SCHEMA},
+    )
+    raw = response.choices[0].message.content
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Structured output guarantees valid JSON, but be defensive anyway
+        return {k: None for k in _FACTS_SCHEMA["schema"]["required"]}
+
+
+# ─── Pass 2: GPT scoring ──────────────────────────────────────────────────────
+
+_SCORING_SCHEMA = {
+    "name": "call_scoring",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "checklist": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "item":   {"type": "string"},
+                        "result": {"type": "string", "enum": ["yes", "no", "partial", "n/a"]},
+                        "note":   {"type": "string"},
+                    },
+                    "required": ["item", "result", "note"],
+                },
+            },
+            "hard_disqualifiers_triggered": {"type": "array", "items": {"type": "string"}},
+            "red_flags":                    {"type": "array", "items": {"type": "string"}},
+            "score":                        {"type": "integer", "minimum": 0, "maximum": 100},
+            "lead_template":                {"type": "string"},
+            "preliminary_temp":             {"type": ["string", "null"]},
+            "coaching_notes":               {"type": "array", "items": {"type": "string"}},
+            "strengths":                    {"type": "array", "items": {"type": "string"}},
+            "call_data": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "ap":                {"type": ["number", "null"]},
+                    "has_valid_motive":  {"type": "boolean"},
+                    "timeline_months":   {"type": ["number", "null"]},
+                    "open_to_listing":   {"type": "boolean"},
+                },
+                "required": ["ap", "has_valid_motive", "timeline_months", "open_to_listing"],
+            },
+        },
+        "required": [
+            "checklist", "hard_disqualifiers_triggered", "red_flags", "score",
+            "lead_template", "preliminary_temp", "coaching_notes", "strengths",
+            "call_data",
+        ],
+    },
+}
+
 
 def _build_prompt(transcript: str, client_key: str, caller_name: str, call_date: str,
-                  phone_number: str | None = None) -> str:
+                  phone_number: str | None = None, facts: dict | None = None) -> str:
     criteria = CLIENT_CRITERIA[client_key]
     template_key = criteria["template_type"]
     template = LEAD_TEMPLATES[template_key]
@@ -331,60 +514,45 @@ def _build_prompt(transcript: str, client_key: str, caller_name: str, call_date:
 
     phone_note = (
         f"   - PROSPECT PHONE NUMBER = \"{phone_number}\" (extracted from the call recording filename — "
-        f"use this EXACT value in any phone / number field, do NOT infer from the transcript).\n"
+        f"use this EXACT value in any phone / number field).\n"
         if phone_number else
-        "   - Phone number: leave blank if not explicitly mentioned in transcript.\n"
+        "   - Phone number: leave blank if not provided in the extracted facts.\n"
+    )
+
+    facts_block = (
+        f"\nEXTRACTED FACTS (use these verbatim — do NOT re-derive from transcript):\n"
+        f"{json.dumps(facts, indent=2)}\n"
+        if facts is not None else ""
     )
 
     return f"""You are a call quality analyst for a real estate / business acquisitions outreach team.
 
-Analyze the following call transcript and return a JSON object with these keys:
+You will receive (1) a set of already-extracted facts the prospect literally stated, and
+(2) the raw transcript. Use the FACTS to fill the lead template. Use the TRANSCRIPT only
+to judge call quality (checklist, score, coaching). Do not invent facts that aren't in the
+extracted-facts block.
 
-1. "checklist": array of objects — one per checklist item:
-   {{ "item": "<item text>", "result": "yes" | "no" | "partial" | "n/a", "note": "<short explanation>" }}
+Return a JSON object matching the required schema.
 
-2. "hard_disqualifiers_triggered": array of strings (empty if none triggered)
+Key behaviour:
 
-3. "red_flags": array of strings (empty if none found)
-
-4. "score": integer 0–100 based on checklist performance
-
-5. "lead_template": the filled lead template as a plain string. Rules:
+- "checklist": one entry per checklist item below. result ∈ yes / no / partial / n/a.
+- "hard_disqualifiers_triggered": list anything from the disqualifier list the prospect triggered.
+- "red_flags": list anything from the red-flag list that appeared.
+- "score": integer 0–100 based on checklist performance.
+- "lead_template": the filled lead template as a plain string.
    - caller_name = "{caller_name}"
    - date = "{call_date}"
-{phone_note}   - {mv_note}Any information the prospect gave that has no matching field → put in Notes.
+{phone_note}   - {mv_note}Any field not present in the extracted facts → leave blank or "N/A".
+   - Use the EXTRACTED FACTS verbatim for every field they cover.
+   - Any extra prospect-stated detail in other_notes → put in Notes.
    - For real estate clients: include preliminary temperature and flag as "Preliminary — recalculate after MV is confirmed" if MV is unknown.
-
-   EMAIL EXTRACTION — read very carefully and follow every rule:
-   - Hyphened single letters spell a word: "D-U-S-T-I-N" = "dustin", "B-R-O-O-K-S" = "brooks"
-   - A dot spoken before a name segment = literal dot: ".Brooks" = ".brooks"
-   - "at [Company].com" or "at [Company] dot com" = "@company.com"
-   - "dot" between two word parts = literal dot: "john dot smith" = "john.smith"
-   - Reconstruct the full email from ALL spoken parts in sequence.
-   - Example: "dustin, D-U-S-T-I-N, .Brooks, B-R-O-O-K-S, at DoubleDOutfitters.com"
-     → dustin.brooks@doubledoutfitters.com
-   - Example: "john at gmail dot com" → john@gmail.com
-   - Example: "sierra alpha romeo alpha at yahoo dot com" → sara@yahoo.com
-   - If letters are repeated/confirmed (prospect says name then spells it), use the spelled version, NOT the spoken name before spelling.
-   - Always lowercase the final email.
-
-   EMAIL CORRECTIONS — CRITICAL:
-   - If someone gives an email and then IMMEDIATELY corrects it (says "not plural", "without the s", "just service not services", "correction:", "actually it's", "I mean", "sorry it's"), ALWAYS use the CORRECTED version. The correction overrides EVERYTHING said before.
-   - Example: agent hears "proroofingservices1 at gmail dot com" then says "not plural on services, just service" → final email MUST be proroofingservice1@gmail.com
-   - Example: "john@gmail.com — actually make that johnny@gmail.com" → johnny@gmail.com
-   - Read the ENTIRE conversation after the email is first given to check for any correction.
-   - When in doubt, use the LAST version the prospect confirmed.
-
-6. "preliminary_temp": one of Hot / Warm / Cold / Nurture / Throwaway (real estate only, else null)
+- "preliminary_temp": one of Hot / Warm / Cold / Nurture / Throwaway (real estate only, else null).
    Use this logic:
 {TEMP_LOGIC}
-
-7. "coaching_notes": 2–4 short bullet points of specific feedback for this agent on this call
-
-8. "strengths": 1–3 things the agent did well
-
-9. "call_data": a small object used for temperature recalculation when MV is added later:
-   {{ "ap": <asking price as a number, or null>, "has_valid_motive": <true|false>, "timeline_months": <estimated months, or null>, "open_to_listing": <true|false> }}
+- "coaching_notes": 2–4 short bullet points of specific feedback for this agent on this call.
+- "strengths": 1–3 things the agent did well.
+- "call_data": {{ ap, has_valid_motive, timeline_months, open_to_listing }} — prefer values from extracted facts.
 
 ---
 CLIENT: {client_key}
@@ -401,43 +569,30 @@ RED FLAGS TO WATCH FOR:
 
 TEMPLATE TO FILL:
 {template}
-
+{facts_block}
 ---
 TRANSCRIPT:
 {transcript}
-
-Return ONLY valid JSON. No markdown fences, no commentary outside the JSON.
 """
 
 
 def score(transcript: str, client_key: str, caller_name: str, call_date: str,
-          phone_number: str | None = None) -> dict:
+          phone_number: str | None = None, facts: dict | None = None) -> dict:
+    """
+    Pass 2 — grade the call and fill the lead template.
+    Uses OpenAI's strict JSON schema enforcement so the output is guaranteed
+    to match _SCORING_SCHEMA. No regex-fallback parser needed.
+    """
     client = get_client()
-    prompt = _build_prompt(transcript, client_key, caller_name, call_date, phone_number)
+    prompt = _build_prompt(transcript, client_key, caller_name, call_date, phone_number, facts)
 
     response = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
+        response_format={"type": "json_schema", "json_schema": _SCORING_SCHEMA},
     )
-
-    raw = response.choices[0].message.content.strip()
-
-    # Strip markdown fences if present
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        # Try to extract the largest {...} block
-        match = re.search(r'\{[\s\S]*\}', raw)
-        if match:
-            try:
-                return json.loads(match.group())
-            except Exception:
-                pass
-        return {"error": "Failed to parse GPT response", "raw": raw}
+    return json.loads(response.choices[0].message.content)
 
 
 # ─── Speaker diarization (agent vs prospect) ──────────────────────────────────
@@ -555,15 +710,24 @@ def run(
             on_progress(25, "Transcribing (Whisper)…")
             plain_transcript, stamped_transcript = transcribe(file_path)
 
-            # Run diarization + scoring in parallel — both depend only on the
-            # transcript and are independent of each other. Cuts ~40% off the
-            # post-transcription wall-clock time.
-            on_progress(60, "Analyzing speakers & scoring (parallel)…")
+            # Run speaker diarization in parallel with the two-pass
+            # (extract facts → score) chain. Diarize only needs the stamped
+            # transcript; the extract→score chain only needs the plain one,
+            # so they're fully independent.
+            on_progress(60, "Extracting facts, scoring & identifying speakers…")
+
+            def _extract_then_score():
+                facts = extract_facts(plain_transcript, client_key)
+                result = score(
+                    plain_transcript, client_key, caller_name, call_date,
+                    phone_number, facts,
+                )
+                result["_facts"] = facts  # stash for UI / debugging
+                return result
+
             with ThreadPoolExecutor(max_workers=2) as ex:
                 f_labels = ex.submit(diarize, stamped_transcript, caller_name, client_key)
-                f_result = ex.submit(
-                    score, plain_transcript, client_key, caller_name, call_date, phone_number
-                )
+                f_result = ex.submit(_extract_then_score)
                 labels = f_labels.result()
                 result = f_result.result()
 
