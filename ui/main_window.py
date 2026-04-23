@@ -34,15 +34,39 @@ class MainWindow(TkinterDnD.Tk):
         self.minsize(960, 640)
         self.configure(bg=BG_MAIN)
 
-        # Set window icon
-        ico = _get_icon_path()
-        if ico:
-            try:
-                self.iconbitmap(ico)
-            except Exception:
-                pass
+        # Set window icon — triple-layer so Windows taskbar + window both update
+        self._apply_icon()
 
         self._build_ui()
+
+    def _apply_icon(self):
+        ico = _get_icon_path()
+        if not ico:
+            return
+
+        # 1. iconbitmap(default=...) applies to EVERY Tk window (including dialogs)
+        #    and is what Windows usually reads for the taskbar.
+        try:
+            self.iconbitmap(default=ico)
+        except Exception:
+            pass
+
+        # 2. Direct iconbitmap on this window (belt-and-suspenders).
+        try:
+            self.iconbitmap(ico)
+        except Exception:
+            pass
+
+        # 3. iconphoto fallback — reads the PNG-ish image through PIL and sets
+        #    it as the WM icon. This covers cases where Tk's ICO parser fails.
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(ico)
+            photo = ImageTk.PhotoImage(img)
+            self.iconphoto(True, photo)
+            self._icon_ref = photo  # keep a ref so Tk doesn't GC it
+        except Exception:
+            pass
 
     # ── Layout ────────────────────────────────────────────────────────────────
 

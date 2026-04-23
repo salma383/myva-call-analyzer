@@ -50,43 +50,112 @@ def _fmt_time(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+# Chunk size for parallel Whisper transcription.
+# ~3.5 min is a sweet spot: big enough that the API overhead is amortized,
+# small enough that 3-5 chunks fit in a long call and parallelize well.
+_CHUNK_MS = 3 * 60 * 1000 + 30 * 1000  # 3:30
+_MAX_PARALLEL_CHUNKS = 5
+
+
+def _transcribe_file(path: str, offset_sec: float):
+    """Transcribe a single audio file and return (text, offset-shifted segments)."""
+    client = get_client()
+    with open(path, "rb") as f:
+        result = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f,
+            prompt=WHISPER_VOCAB,
+            response_format="verbose_json",
+            timestamp_granularities=["segment"],
+        )
+
+    raw_text = result.text if hasattr(result, "text") else str(result)
+    for phrase in WHISPER_HALLUCINATIONS:
+        raw_text = raw_text.replace(phrase, "")
+
+    segments = getattr(result, "segments", None) or []
+    shifted = []
+    for seg in segments:
+        start = getattr(seg, "start", 0.0) + offset_sec
+        text  = getattr(seg, "text", "").strip()
+        if text:
+            shifted.append((start, text))
+    return raw_text.strip(), shifted
+
+
 def transcribe(file_path: str) -> tuple[str, str]:
     """
     Returns (plain_transcript, stamped_transcript).
-    Uses verbose_json for real segment timestamps — much more accurate than estimation.
+    For calls longer than one chunk, splits audio into parallel chunks and
+    transcribes them concurrently — network-bound work, so threading is a huge win.
     """
-    client = get_client()
-    wav_path = prepare_audio(file_path)
+    from pydub import AudioSegment
+    import tempfile
+
+    # Preprocess once (16kHz mono) — tiny file, fast re-encoding of sub-slices
+    prepped_path = prepare_audio(file_path)
     try:
-        with open(wav_path, "rb") as f:
-            result = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=f,
-                prompt=WHISPER_VOCAB,
-                response_format="verbose_json",
-                timestamp_granularities=["segment"],
-            )
+        audio = AudioSegment.from_file(prepped_path)
+        duration_ms = len(audio)
 
-        # Clean up known hallucinations
-        raw_text = result.text if hasattr(result, "text") else str(result)
-        for phrase in WHISPER_HALLUCINATIONS:
-            raw_text = raw_text.replace(phrase, "")
+        # Single-chunk fast path (short call) — no threading overhead
+        if duration_ms <= _CHUNK_MS:
+            raw_text, shifted_segments = _transcribe_file(prepped_path, 0.0)
+        else:
+            # Slice into chunks, write each to a temp mp3, transcribe in parallel
+            chunk_paths: list[tuple[str, float]] = []
+            starts = list(range(0, duration_ms, _CHUNK_MS))
+            for start_ms in starts:
+                end_ms = min(start_ms + _CHUNK_MS, duration_ms)
+                slice_ = audio[start_ms:end_ms]
+                tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                tmp.close()
+                slice_.export(tmp.name, format="mp3", bitrate="64k")
+                chunk_paths.append((tmp.name, start_ms / 1000.0))
 
-        # Build plain transcript with phonetic reconstruction
-        plain = reconstruct_spelled_out(raw_text.strip())
+            try:
+                workers = min(_MAX_PARALLEL_CHUNKS, len(chunk_paths))
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    futures = [
+                        ex.submit(_transcribe_file, p, off) for p, off in chunk_paths
+                    ]
+                    chunk_results = [f.result() for f in futures]
+            finally:
+                for p, _ in chunk_paths:
+                    if os.path.exists(p):
+                        try:
+                            os.unlink(p)
+                        except Exception:
+                            pass
 
-        # Build stamped version from actual segment timestamps
-        segments = getattr(result, "segments", None) or []
-        if segments:
-            stamped = _build_stamped_from_segments(segments)
+            # Stitch in chronological order (ThreadPoolExecutor preserves submit order)
+            raw_text = " ".join(r[0] for r in chunk_results).strip()
+            shifted_segments = []
+            for _, segs in chunk_results:
+                shifted_segments.extend(segs)
+            shifted_segments.sort(key=lambda s: s[0])
+
+        plain = reconstruct_spelled_out(raw_text)
+
+        if shifted_segments:
+            lines = []
+            for start, text in shifted_segments:
+                for phrase in WHISPER_HALLUCINATIONS:
+                    text = text.replace(phrase, "")
+                text = reconstruct_spelled_out(text.strip())
+                if text:
+                    lines.append(f"[{_fmt_time(start)}] {text}")
+            stamped = "\n".join(lines)
         else:
             stamped = _add_rough_timestamps(plain)
 
         return plain, stamped
-
     finally:
-        if os.path.exists(wav_path):
-            os.unlink(wav_path)
+        if os.path.exists(prepped_path):
+            try:
+                os.unlink(prepped_path)
+            except Exception:
+                pass
 
 
 def _build_stamped_from_segments(segments) -> str:
