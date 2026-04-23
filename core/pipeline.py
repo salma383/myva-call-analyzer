@@ -603,7 +603,11 @@ Analyze the following call transcript and return a JSON object with these keys:
    - caller_name = "{caller_name}"
    - date = "{call_date}"
 {phone_note}   - {mv_note}Any information the prospect gave that has no matching field → put in Notes.
-   - For real estate clients: include preliminary temperature and flag as "Preliminary — recalculate after MV is confirmed" if MV is unknown.
+   - For real estate clients: fill the Temp / Temperature line with a single concrete
+     word (Hot / Warm / Cold / Nurture / Throwaway). NEVER write "Preliminary",
+     "recalculate after MV", "TBD", "unknown", "pending", or anything similar in the
+     Temp line. The MV recalculation happens in the app after the user enters it —
+     your job is to commit to the best temp the call justifies right now.
 
    EMAIL EXTRACTION — read very carefully and follow every rule:
    - Hyphened single letters spell a word: "D-U-S-T-I-N" = "dustin", "B-R-O-O-K-S" = "brooks"
@@ -916,6 +920,41 @@ def _apply_facts(template_text: str, facts: dict) -> str:
     return template_text
 
 
+def _scrub_preliminary_text(template_text: str, temp: str | None) -> str:
+    """
+    Remove leftover 'Preliminary — recalculate after MV…' boilerplate from the
+    Temp / Temperature line and replace with the concrete temp pick. Fallback
+    only — the prompt already instructs GPT not to write this phrase.
+    """
+    if not template_text:
+        return template_text
+
+    # Patterns like: "Temp: Warm (Preliminary — recalculate after MV is confirmed)"
+    # or: "Temperature: Preliminary — recalc after MV"
+    def _fix_temp_line(match):
+        label = match.group(1)
+        body = match.group(2)
+        # Strip any "preliminary" / "recalc" / "after MV" cruft
+        cleaned = re.sub(
+            r'\b(?:preliminary|recalc(?:ulate)?|after\s+mv|tbd|unknown|pending)\b.*$',
+            '',
+            body,
+            flags=re.IGNORECASE,
+        ).strip(" -—–()[]:.,")
+        # Also strip parenthetical tails
+        cleaned = re.sub(r'\s*[\(\[][^)]*[\)\]]\s*$', '', cleaned).strip()
+        if not cleaned and temp:
+            cleaned = temp
+        return f"{label} {cleaned}" if cleaned else f"{label} {temp or ''}"
+
+    return re.sub(
+        r'^((?:Lead\s+)?Temp(?:erature)?\s*:)\s*(.*)$',
+        _fix_temp_line,
+        template_text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
+
 def _inject_phone(template_text: str, phone: str) -> str:
     """
     Safety net that forces the phone number into the filled lead template.
@@ -1051,6 +1090,14 @@ def run(
             # Safety-net: force the phone into the filled template even if GPT missed it
             if phone_number and result.get("lead_template"):
                 result["lead_template"] = _inject_phone(result["lead_template"], phone_number)
+
+            # Safety-net: strip any "Preliminary — recalculate..." boilerplate
+            # that may have slipped into the Temp line despite prompt instructions
+            if result.get("lead_template"):
+                result["lead_template"] = _scrub_preliminary_text(
+                    result["lead_template"],
+                    result.get("preliminary_temp"),
+                )
 
             timings["total_s"] = round(time.perf_counter() - t_total, 2)
 

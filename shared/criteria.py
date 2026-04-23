@@ -419,12 +419,15 @@ Determine lead temperature using these rules IN ORDER:
 2. If timeline is more than 1 year → NURTURE
 3. If timeline is around 1 year → COLD
 4. If timeline is ASAP to 3 months (soon):
-   a. If AP < MV (or MV unknown) AND valid motive → HOT
+   a. If AP < MV (or MV unknown but seller highly motivated) AND valid motive → HOT
    b. If AP > MV AND valid motive AND open to listing → WARM
    c. If AP > MV AND valid motive AND NOT open to listing → COLD
 
-When MV is unknown (not yet looked up), base preliminary temperature on motive and timeline only,
-and flag it as "Preliminary — recalculate after MV is confirmed."
+When MV is UNKNOWN, ALWAYS still pick the best concrete temperature from available
+signals (motive strength, timeline, asking price reasonableness, seller attitude, open
+to listing). NEVER return null and NEVER write the phrase "Preliminary — recalculate
+after MV" into the template or anywhere else. The user will enter the MV afterward and
+the app will recalculate automatically if needed.
 
 Always add any information the prospect provided that does not fit an existing field into the Notes section.
 """
