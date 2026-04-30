@@ -1,11 +1,17 @@
 """
-MyVA Client Criteria — Call Analyzer Desktop App
+MyVA Client Criteria — shared by desktop app and Streamlit website.
+All active clients, lead templates, scoring logic, and Whisper config.
 """
+
+# ─── Client Criteria ─────────────────────────────────────────────────────────
 
 CLIENT_CRITERIA = {
 
     "Dealonomy (M&A)": {
         "type": "business",
+        "template_type": "business",
+        "dialer": "PhoneBurner",
+        "agent": "Lilly / Nada",
         "framework": "RAT (Revenue · Authority · Timeline)",
         "checklist": [
             "Did agent confirm revenue is $1.5M+?",
@@ -35,13 +41,16 @@ CLIENT_CRITERIA = {
             "Lock in specific appointment time — don't accept 'call me later'",
         ],
         "script_notes": "Opener should be disarming. Hook = 'have you ever thought about what your company might be worth?'",
-        "template_type": "business",
     },
 
     "Stuart Moss / CIC Partners": {
         "type": "business",
+        "template_type": "business",
+        "dialer": "Call Tools",
+        "agent": "Marie",
         "framework": "5-Step Script Flow",
         "checklist": [
+            "Did agent confirm business is 5+ years in operation?",
             "If agent reached the owner — did agent ask about long-term plans (sell, partner, step back)?",
             "If agent reached the owner — did agent get business nature and number of employees?",
             "If agent reached the owner — did agent get estimated annual revenues?",
@@ -65,11 +74,47 @@ CLIENT_CRITERIA = {
             "Always close with a specific date/time for the intro call",
         ],
         "script_notes": "Must sound like a private introduction, not a pitch.",
-        "template_type": "business",
+    },
+
+    "Tristen / Loftey (RE Sellers)": {
+        "type": "real_estate",
+        "template_type": "listing",
+        "dialer": "Enzo",
+        "agent": "Joy",
+        "framework": "Motivation · Timeline · Email",
+        "checklist": [
+            "Did agent say 'home' (NOT 'house' or 'property')?",
+            "Did agent ask if prospect is considering selling?",
+            "Did agent get the timeline (within 2 years)?",
+            "Did agent get the motivation (why selling)?",
+            "Did agent ask for email?",
+            "Did agent schedule a callback?",
+            "Did agent avoid revealing 'Loftey Group' name before qualification?",
+        ],
+        "hard_disqualifiers": [
+            "No timeline + no email = not a lead",
+            "Confirmed not selling within 24 months and no email given",
+        ],
+        "red_flags": [
+            "Agent said 'house' or 'property' instead of 'home'",
+            "Agent revealed 'Loftey Group' before prospect qualified",
+            "Agent skipped asking for email",
+            "Agent didn't ask about motivation",
+        ],
+        "coaching_focus": [
+            "ALWAYS say 'home' — this is Tristen's hard rule, no exceptions",
+            "Email is required even for cold leads — always ask",
+            "Motivation is key: retiring, downsizing, divorce, kids graduating, etc.",
+            "Lock in specific callback time — not 'call anytime'",
+        ],
+        "script_notes": "Cold/email leads still count if email is captured. Conversion target: 1.5%.",
     },
 
     "Smithton / Boone (RE Cash Buyer)": {
         "type": "real_estate",
+        "template_type": "smithton",
+        "dialer": "Call Tools",
+        "agent": "Nehal",
         "framework": "6-Part: Price · Condition · Timeline · Motivation · Close",
         "checklist": [
             "Did agent confirm seller's name and property address?",
@@ -81,6 +126,7 @@ CLIENT_CRITERIA = {
             "Did agent ask about motivation?",
             "Did agent schedule callback with Property Specialist?",
             "Did agent get email?",
+            "Did agent submit via ReSimpli form (not just Discord)?",
         ],
         "hard_disqualifiers": [
             "Prospect said they are not looking to sell",
@@ -96,14 +142,16 @@ CLIENT_CRITERIA = {
             "Price anchor starts at 40% of Zillow — work up slowly",
             "Mortgage balance is key — no equity = deal won't work",
             "Throwaway = no motivation — don't submit",
-            "Always schedule a specific callback with the Property Specialist",
+            "Always use ReSimpli form AND Discord post",
         ],
         "script_notes": "Cash offer framing: no repairs, no commissions, fast close, cover closing costs.",
-        "template_type": "smithton",
     },
 
     "Jordyn / Barracuda (RE Multifamily)": {
         "type": "real_estate",
+        "template_type": "jordyn",
+        "dialer": "Enzo",
+        "agent": "Nehal",
         "framework": "Multifamily Qualification",
         "checklist": [
             "Did agent ask number of units?",
@@ -116,6 +164,7 @@ CLIENT_CRITERIA = {
             "Did agent ask about timeline?",
             "Did agent ask about motivation?",
             "Did agent confirm phone + email before ending call?",
+            "Did agent send notes to Barracuda WhatsApp?",
         ],
         "hard_disqualifiers": [
             "Single-family home (not multifamily)",
@@ -125,25 +174,93 @@ CLIENT_CRITERIA = {
             "Agent skipped occupancy / rent questions",
             "Agent did not clarify this is multifamily only",
             "Agent skipped email or phone confirmation",
+            "Notes not sent to Barracuda WhatsApp",
         ],
         "coaching_focus": [
             "Multifamily ONLY — single-family does not qualify",
             "Get all financial details: units, occupancy, rent, CapEx",
             "On price: 'I don't run numbers — I'll check with Jordyn after this'",
-            "Always confirm phone AND email before hanging up",
+            "Always send notes to Barracuda WhatsApp after call",
         ],
-        "script_notes": "Focus areas: St. Louis, Columbia, Jefferson City. They close on deals themselves — not a wholesaler.",
-        "template_type": "jordyn",
+        "script_notes": "Focus areas: St. Louis, Columbia, Jefferson City. NOT a wholesaler — they close deals themselves.",
+    },
+
+    "Integrity (RE Sellers)": {
+        "type": "real_estate",
+        "template_type": "smithton",
+        "dialer": "Call Tools",
+        "agent": "Menna",
+        "framework": "Cash Buyer Qualification",
+        "checklist": [
+            "Did agent confirm owner name and property address?",
+            "Did agent gauge selling interest?",
+            "Did agent ask about property details (beds/baths/sqft)?",
+            "Did agent explain cash offer benefits (no repairs, no commissions, fast close)?",
+            "Did agent ask about mortgage balance / equity?",
+            "Did agent get motivation?",
+            "Did agent schedule specific callback date/time?",
+            "Did agent get email?",
+        ],
+        "hard_disqualifiers": [
+            "Won't consider below-market cash offer AND won't list",
+            "No equity (mortgage too high)",
+        ],
+        "red_flags": [
+            "Agent skipped mortgage / equity question",
+            "Agent gave up without setting specific callback",
+            "Agent didn't explain cash offer advantages",
+        ],
+        "coaching_focus": [
+            "Foreclosure leads: show empathy + mention limited time before auction",
+            "Tax lien leads: explain you'll pay off back taxes at closing",
+            "Inherited property: emphasize avoiding headache of maintenance",
+            "ALWAYS end with specific callback date — motivated sellers go cold fast",
+        ],
+        "script_notes": "Website: integritylps.com. Submit via ReSimpli link.",
+    },
+
+    "Integrity (Buyers Camp)": {
+        "type": "business",
+        "template_type": "buyers",
+        "dialer": "Call Tools",
+        "agent": "Menna",
+        "framework": "Investor Buyer List Building",
+        "checklist": [
+            "Did agent confirm prospect owns multiple properties?",
+            "Did agent ask if they're looking to acquire more?",
+            "Did agent get state + city (minimum required)?",
+            "Did agent get property type?",
+            "Did agent ask about specific zip codes (for major cities)?",
+            "Did agent ask about property manager interest?",
+            "Did agent ask about insurance review interest?",
+        ],
+        "hard_disqualifiers": [
+            "Only owns one property",
+            "Not looking to acquire more",
+        ],
+        "red_flags": [
+            "Agent didn't get state + city (minimum info)",
+            "Agent treated this like a seller call",
+        ],
+        "coaching_focus": [
+            "This is a BUYER list — you're building Integrity's acquisition pipeline",
+            "Minimum: state + city + property type. Always try for more.",
+            "For big cities: get specific zip codes",
+        ],
+        "script_notes": "Opening: 'I noticed from public records you own multiple properties...'",
     },
 
     "Scott Fuller / Haven Senior": {
         "type": "referral",
+        "template_type": "scott",
+        "dialer": "Call Tools",
+        "agent": "Sam",
         "framework": "Referral Capture",
         "checklist": [
             "If agent reached the owner — did agent make clear this is NOT asking if their facility is for sale?",
             "If agent reached the owner — did agent ask if they know someone who might be selling a senior facility?",
             "Did agent get the owner's email? (always)",
-            "Did agent speak confidentially and avoid operational questions? (always)",
+            "Did agent speak confidentially and avoid operational questions?",
             "Did agent use the correct voicemail rotation (VM1/VM2/VM3)?",
             "If owner was unavailable — did agent pivot to email capture?",
         ],
@@ -162,11 +279,13 @@ CLIENT_CRITERIA = {
             "Use VM rotation exactly: VM1 Day 1, VM2 Day 5, VM3 Day 10",
         ],
         "script_notes": "Say: 'Scott recently sold a community in Missouri' — confidently, no elaboration unless asked.",
-        "template_type": "scott",
     },
 
     "Sir Charles / Premier Site": {
         "type": "real_estate",
+        "template_type": "listing",
+        "dialer": "Call Tools",
+        "agent": "Rawan",
         "framework": "Dual Path: Seller OR Construction",
         "checklist": [
             "Did agent confirm owner + property address?",
@@ -178,6 +297,7 @@ CLIENT_CRITERIA = {
             "Did agent get price anchor ('what number would you need to move forward')?",
             "Did agent get email?",
             "Did agent ask if prospect is open to listing the property?",
+            "Did agent tag correctly in Call Tools (Warm Lead-Seller / Listing Lead / Construction Lead)?",
         ],
         "hard_disqualifiers": [
             "No to selling AND no renovation project AND not open to listing",
@@ -186,19 +306,22 @@ CLIENT_CRITERIA = {
             "Agent gave up after 'not selling' without pivoting to construction path",
             "Agent took on small handyman requests (below minimum threshold)",
             "Agent didn't ask about listing option",
+            "Agent didn't tag correctly in Call Tools",
         ],
         "coaching_focus": [
             "Always try BOTH paths — don't leave after seller says no",
             "Construction minimum: paint, roofing, gutters, floors, kitchens, baths, sheetrock",
             "Too small: minor patches, single fixture replacements — politely decline",
-            "If wants market value → pivot to listing path",
+            "If wants market value → pivot to listing path (in-house realtor)",
         ],
-        "script_notes": "Two pipelines: Acquisition (seller) and Construction. Always try both.",
-        "template_type": "listing",
+        "script_notes": "Two GHL pipelines: Acquisition Pipeline (seller) and Construction Pipeline.",
     },
 
     "Shiraz (RE Listing)": {
         "type": "real_estate",
+        "template_type": "listing",
+        "dialer": "Enzo",
+        "agent": "Sam",
         "framework": "Listing Agent Script",
         "checklist": [
             "Did agent ask if prospect is considering selling within 2 years?",
@@ -213,11 +336,13 @@ CLIENT_CRITERIA = {
         ],
         "hard_disqualifiers": [
             "Not selling within 2 years and no email",
+            "Firmly not open to working with a realtor",
         ],
         "red_flags": [
             "Agent skipped email capture",
             "Agent didn't ask about property condition or updates",
             "Agent didn't ask about listing option",
+            "Agent didn't ask about realtor openness",
         ],
         "coaching_focus": [
             "Ask: 'Do you have a realtor you like working with?' (soft opener)",
@@ -225,18 +350,21 @@ CLIENT_CRITERIA = {
             "Ask about condition and updates — it helps with valuation",
         ],
         "script_notes": "Listing script — same flow as Kyle/Biancardi.",
-        "template_type": "listing",
     },
 
     "Kyle / Biancardi (RE Listing)": {
         "type": "real_estate",
-        "framework": "Listing + Appointment",
+        "template_type": "listing",
+        "dialer": "Call Tools",
+        "agent": "Marie",
+        "framework": "Listing + HubSpot Appointment",
         "checklist": [
             "Did agent ask if prospect is considering selling?",
             "Did agent ask about timeline and motivation?",
             "Did agent ask about property condition?",
             "Did agent ask if there are any updates to the property?",
             "Did agent ask if prospect is open to listing the property?",
+            "Did agent attempt to book appointment via HubSpot calendar?",
             "Did agent get email?",
             "Did agent get callback confirmation?",
         ],
@@ -247,39 +375,45 @@ CLIENT_CRITERIA = {
             "Agent skipped email",
             "Agent didn't ask about property condition or updates",
             "Agent didn't ask about listing option",
+            "Agent didn't push for HubSpot appointment booking",
         ],
         "coaching_focus": [
-            "Goal is appointment booking — always push for a specific callback time",
+            "Goal is appointment booking — push HubSpot calendar hard",
             "Always get email even if they won't book now",
             "Condition and updates matter — ask every time",
         ],
-        "script_notes": "Primary close = booking a specific callback or appointment.",
-        "template_type": "listing",
+        "script_notes": "Appointments go to HubSpot calendar — this is the primary close.",
     },
 
     "Giancarlo / Real Broker NJ": {
         "type": "real_estate",
-        "framework": "Seller + Referral",
+        "template_type": "giancarlo",
+        "dialer": "Enzo",
+        "agent": "TBD",
+        "framework": "Seller + Referral (5 Campaigns)",
         "checklist": [
             "Did agent ask if prospect is considering selling?",
+            "Did agent ask if they know anyone else considering selling (referral question)?",
             "Did agent get timeline?",
             "Did agent get motivation?",
             "Did agent get email?",
-            "Did agent schedule a callback at the prospect's best time?",
+            "Did agent respect 6pm callback cutoff?",
+            "Did agent schedule callback within cutoff time?",
         ],
         "hard_disqualifiers": [
-            "Not selling and no email",
+            "Not selling and no referral and no email",
         ],
         "red_flags": [
+            "Agent scheduled callback after 6pm (violation)",
+            "Agent skipped the referral question",
             "Agent skipped email capture",
-            "Agent didn't ask for callback at prospect's best time",
         ],
         "coaching_focus": [
-            "Always ask for the prospect's best time for a callback — don't assume",
-            "Even cold leads need an email captured",
+            "ALWAYS ask referral question — even if not selling themselves",
+            "6pm callback cutoff — never schedule beyond that",
+            "5 campaigns active — confirm which campaign before analyzing",
         ],
-        "script_notes": "5 active campaigns — confirm which campaign before analyzing.",
-        "template_type": "giancarlo",
+        "script_notes": "5 active campaigns. Referral question is mandatory.",
     },
 }
 
@@ -288,129 +422,153 @@ CLIENT_CRITERIA = {
 
 LEAD_TEMPLATES = {
 
-    "business": """{caller_name} - {date}
-Temp: {temp}
+    "business": """(Agent name and date)
+Temp:
 
 Contact Info:
-  Contact Name: {contact_name}
-  Business Name: {business_name}
-  Number: {phone}
-  Email: {email}
+  Contact Name:
+  Business Name:
+  Number:
+  Email:
 
 Business Details:
-  Business Address: {address}
-  Nature of Business: {nature_of_business}
-  Number of Employees: {employees}
-  Est. Annual Revenue: {revenue}
-  Best Time Window for Intro Call: {callback}
-  Notes: {notes}
+  Business Address:
+  Nature of Business:
+  Number of Employees:
+  Est. Annual Revenue:
+  Best Time Window for Intro Call:
+  Notes:
 
-Call Recording: """,
+Call Recording: [Paste link here]""",
 
-    "smithton": """{caller_name} - {date}
-Temp: {temp}
-Lead Type: {lead_type}
+    "smithton": """(Agent name and date)
+Temp:
+Lead Type:
 
-Seller Name: {seller_name}
-Address: {address}
-Phone Number: {phone}
-Email: {email}
+Seller Name:
+Address:
+Phone Number:
+Email:
 
-Motive/Pain: {motivation}
-Actively Selling? {actively_selling}
-List with Realtor? {list_with_realtor}
-What if we didn't give them the price: {price_reaction}
+Motive/Pain:
+Actively Selling?
+List with Realtor?
+What if we didn't give them the price:
 
-Occupancy: {occupancy}
-Beds/Baths: {beds_baths}
-Sqft: {sqft}
-Condition/Repairs: {condition}
-Mortgage: {mortgage}
+Occupancy:
+Beds/Baths:
+Sqft:
+Condition/Repairs:
+Mortgage:
 
 Market Value:
-Asking Price: {asking_price}
-Timeline: {timeline}
+Asking Price:
+Timeline:
 
-Callback: {callback}
-Notes: {notes}
-Call Recording: """,
+Callback:
+Notes:
+Call Recording: [Paste link here]""",
 
-    "jordyn": """{caller_name} - {date}
-Lead Temp: {temp}
-Lead Type: {lead_type}
+    "jordyn": """(Agent name and date)
+Lead Temp:
+Lead Type:
 
-Address: {address}
-Seller Name: {seller_name}
-Phone Number: {phone}
-Email: {email}
+Address:
+Seller Name:
+Phone Number:
+Email:
 
-# Units: {units}
-Occupancy: {occupancy}
-Condition: {condition}
+# Units:
+Occupancy:
+Condition:
 
-Timeline: {timeline}
-Reason: {motivation}
-AP: {asking_price}
+Timeline:
+Reason:
+AP:
 MV:
 
-Other Notes: {notes}""",
+Other Notes:
+Call Recording: [Paste link here]""",
 
-    "listing": """{caller_name} - {date}
-Temp: {temp}
+    "listing": """(Agent name and date)
+Temp:
 
 Contact Info:
-  Name: {seller_name}
-  Number: {phone}
-  Email: {email}
-  Address: {address}
-  Call Back On: {callback}
+  Name:
+  Number:
+  Email:
+  Address:
+  Call Back On:
 
-Condition: {condition}
+Condition:
 
 Motivation/Pain and Others:
-  Notes: {notes}
-  Residency: {occupancy}
-  Timeline: {timeline}
-  Reason: {motivation}
-  AP: {asking_price}
+  Notes:
+  Residency:
+  Timeline:
+  Reason:
+  AP:
   Zestimate:
-  Listing: {listing_open}
+  Listing:
 
-Call Recording: """,
+Call Recording: [Paste link here]""",
 
-    "giancarlo": """{caller_name} - {date}
-Temp: {temp}
+    "giancarlo": """(Agent name and date)
+Temp:
 
 Contact Info:
-  Name: {seller_name}
-  Number: {phone}
-  Email: {email}
-  Address: {address}
+  Name:
+  Number:
+  Email:
+  Address:
 
-Notes: {notes}
+Notes:
 
-Timeline: {timeline}
-Listing: {listing_open}
-Reason: {motivation}
+Timeline:
+Listing:
+Reason:
 
-Call Recording: """,
+Call Recording: [Paste link here]""",
 
-    "scott": """{caller_name} - {date}
-Temperature: {temp}
-Name: {contact_name}
-Email: {email}
-Phone: {phone}
-Facility Name: {facility_name}
-Title: {title}
-Address: {address}
+    "scott": """(Agent name and date)
+Temperature:
+Name:
+Email:
+Phone:
+Facility Name:
+Title:
+Address:
 
-Notes: {notes}
+Notes:
 
-Call Recording: """,
+Call Recording: [Paste link here]""",
+
+    "buyers": """(Agent name and date)
+Temp:
+
+Contact Info:
+  Name:
+  Number:
+  Email:
+  Address:
+
+Buyer Criteria:
+  State:
+  City / Area:
+  Property Type:
+  Zip Codes (if major city):
+  Looking to Acquire More:
+
+Additional Services:
+  Property Manager Interest:
+  Insurance Review Interest:
+
+Notes:
+Call Recording: [Paste link here]""",
 }
 
 
-# ─── Temperature Logic (for GPT scoring prompt) ───────────────────────────────
+# ─── Temperature Logic (injected into GPT scoring prompt) ─────────────────────
 
 TEMP_LOGIC = """
 Determine lead temperature using these rules IN ORDER:
@@ -433,38 +591,40 @@ Always add any information the prospect provided that does not fit an existing f
 """
 
 
-# ─── Universal Rules (applied to all clients) ─────────────────────────────────
+# ─── Universal Rules (applied to every client) ────────────────────────────────
 
 UNIVERSAL_RULES = [
     "Did agent always ask for email on every call?",
+    "Did agent always ask the referral question?",
+    "Did agent avoid saying 'My manager will call you with an offer'?",
+    "Did agent avoid mentioning offers proactively?",
     "Did agent confirm prospect's name at least once?",
     "Did agent lock in a specific callback time (not 'call anytime')?",
     "Did agent handle DNC immediately if mentioned (hang up, mark DNC)?",
+    "Did agent stay within post-call time limits (10 seconds for non-leads)?",
     "Did agent sound natural and not robotic?",
     "Did agent reconfirm phone number before ending a lead call?",
-    "Did agent avoid saying 'My manager will call you with an offer'?",
-    "Did agent avoid mentioning offers proactively?",
 ]
 
 
-# ─── Whisper vocabulary hint ──────────────────────────────────────────────────
+# ─── Whisper vocabulary prompt ────────────────────────────────────────────────
+# Balanced ~80-token set. Heavy email-shape primers bias Whisper to skip speech.
 
 WHISPER_VOCAB = (
-    # Keep this balanced and short (~80 tokens). Heavy email-shape primers
-    # were biasing Whisper to pattern-match and drop non-email speech.
-    # Domain terms — helps with rare words Whisper has seen less often
+    # Domain terms
     "Zillow, MLS, realtor, duplex, triplex, multifamily, Zestimate, "
-    "ARV, HOA, escrow, wholesale, "
-    # Client / company names so they come out right
-    "ReSimpli, HubSpot, Dealonomy, Haven Senior, Biancardi, Smithton, "
-    "Boone, CIC Partners, Giancarlo, Shiraz, Premier Site Solutions, "
-    "Sir Charles, Scott Fuller, "
-    # Phonetic alphabet — preserves spelled names/emails without biasing
+    "ARV, HOA, escrow, wholesale, ReSimpli, HubSpot, "
+    # Client / company names
+    "Dealonomy, Haven Senior, Biancardi, Smithton, Boone, "
+    "CIC Partners, Giancarlo, Shiraz, Premier Site Solutions, "
+    "Sir Charles, Scott Fuller, Loftey, Barracuda, Integrity, "
+    # Phonetic alphabet — preserves spelled names/emails
     "alpha, bravo, charlie, delta, echo, foxtrot, golf, hotel, india, "
     "juliet, kilo, lima, mike, november, oscar, papa, quebec, romeo, "
     "sierra, tango, uniform, victor, whiskey, yankee, zulu"
 )
 
+# Known Whisper hallucinations to filter
 WHISPER_HALLUCINATIONS = [
     "thank you for watching",
     "thanks for watching",
