@@ -67,6 +67,13 @@ def _set_windows_app_id():
 
 _set_windows_app_id()
 
+# Install crash logger BEFORE any Tk root or worker thread starts.
+# Captures uncaught exceptions from main thread, worker threads, and Tk
+# callbacks into %LocalAppData%\MyVA\logs\errors.log so intermittent runtime
+# errors are diagnosable.
+from utils.crash_logger import install as _install_crash_logger
+_install_crash_logger()
+
 from config import api_manager, settings
 from ui.main_window import MainWindow
 

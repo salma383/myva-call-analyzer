@@ -1,5 +1,5 @@
 {
-  "version": "1.9.2",
+  "version": "1.9.3",
   "download_url": "https://github.com/salma383/myva-call-analyzer/releases/latest/download/CallAnalyzer.exe",
-  "release_notes": "Stop ffmpeg/ffprobe from flashing console windows during analysis. pydub (the audio library) shells out to ffmpeg for format conversion, duration probing, and silence detection. By default on Windows each of those subprocess calls pops a brief black terminal. Patched subprocess.Popen at startup with CREATE_NO_WINDOW + hidden STARTUPINFO so every ffmpeg/ffprobe invocation runs silently in the background. No more terminal flashes during analysis or audio playback."
+  "release_notes": "Crash logger — every uncaught exception (main thread, worker threads, Tk callbacks) and every pipeline failure now writes a full traceback to %LocalAppData%\\MyVA\\logs\\errors.log. Settings dialog has a new 'Open Error Log Folder' button so you can grab the log when reporting an intermittent runtime error. No behavior change otherwise."
 }

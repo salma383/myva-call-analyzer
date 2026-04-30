@@ -1,3 +1,5 @@
+import os
+import subprocess
 import customtkinter as ctk
 from config import settings
 from ui.theme import *
@@ -7,7 +9,7 @@ class SettingsDialog(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Settings")
-        self.geometry("400x200")
+        self.geometry("400x260")
         self.resizable(False, False)
         self.grab_set()
         self.configure(fg_color=BG_CARD)
@@ -56,6 +58,19 @@ class SettingsDialog(ctk.CTkToplevel):
             state="readonly",
         ).pack(side="left", padx=10)
 
+        # Open error log — handy when reporting intermittent crashes
+        ctk.CTkButton(
+            body, text="📂  Open Error Log Folder",
+            width=240, height=32,
+            fg_color="transparent",
+            hover_color=BG_INPUT,
+            border_color=BORDER, border_width=1,
+            text_color=TEXT_PRIMARY,
+            font=ctk.CTkFont(size=12),
+            corner_radius=8,
+            command=self._open_log_folder,
+        ).pack(pady=(14, 0))
+
         # Save
         ctk.CTkButton(
             body, text="Save",
@@ -65,7 +80,16 @@ class SettingsDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(size=13, weight="bold"),
             corner_radius=8,
             command=self._save,
-        ).pack(pady=(16, 0))
+        ).pack(pady=(12, 0))
+
+    def _open_log_folder(self):
+        try:
+            from utils.crash_logger import errors_log_path
+            log_dir = os.path.dirname(errors_log_path())
+            os.makedirs(log_dir, exist_ok=True)
+            os.startfile(log_dir)
+        except Exception:
+            pass
 
     def _save(self):
         settings.set_value("theme", self.theme_var.get())

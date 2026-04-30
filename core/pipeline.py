@@ -1145,6 +1145,13 @@ def run(
             on_complete(result)
 
         except Exception as exc:
+            # Log full traceback so intermittent failures are diagnosable —
+            # the user only sees str(exc), but errors.log gets the stack.
+            try:
+                from utils.crash_logger import log_exception
+                log_exception(source="pipeline")
+            except Exception:
+                pass
             on_error(str(exc))
 
     threading.Thread(target=_work, daemon=True).start()
